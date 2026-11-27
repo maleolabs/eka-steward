@@ -84,5 +84,7 @@ Run 'eka-steward version' for the build and contract versions.`,
 	root.AddCommand(newVersionCommand())
 	root.AddCommand(newRunCommand())
 	root.AddCommand(newServeCommand())
+	root.AddCommand(newManifestCommand())
+	root.AddCommand(newInstallCommand())
 	return root
 }
