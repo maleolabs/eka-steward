@@ -23,6 +23,7 @@ var expectedRootEntries = []string{
 	"CONTRIBUTING.md",
 	"LICENSE",
 	"README.md",
+	"RELEASE_NOTES.md",
 	"anvil.yaml",
 	"cmd",
 	"docs",

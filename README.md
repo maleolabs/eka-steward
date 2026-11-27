@@ -14,13 +14,16 @@ Module path: `github.com/maleolabs/eka-steward/v2` · Steward `2.0.0` · `eka-co
 
 ## Scope of this release
 
-`2.0.0` is a **scaffold**. It ships the product identity, the module
-contract, the CI/release pipeline and the version surface. The pieces that
-make it an orchestrator — the ACP **control loop** and the **ACP client** —
-are separate work items and are deliberately **absent** here. No
-abstraction is pre-built for them. The deterministic **driver registry**
-(`internal/driver`, see [`docs/drivers.md`](docs/drivers.md)) lands on the
-same foundation.
+`2.0.0` ships the deterministic orchestrator **core**: the ACP **control
+loop** (`internal/loop` — pure `Plan` vs `Step`, single-instance lock,
+cgroup sizing, checkpoint/resume), the **worker pool** with backpressure
+(`internal/pool`), deterministic work selection (`internal/plan`), the
+per-driver **trust + capabilities** model (`internal/driver`), **role
+guardrails** (`internal/guard`), **human approval** (`internal/approval`),
+the **secrets broker** (`internal/secrets`), **review roles**, the
+**discussion phase**, and **observability** (`internal/obs`). All EKA
+writes go through one path (`internal/ekawrite`). See
+[`RELEASE_NOTES.md`](RELEASE_NOTES.md) and [`docs/release.md`](docs/release.md).
 
 ## Invocation: standalone binary, no `eka steward` shim
 
@@ -83,6 +86,9 @@ docs/roles.md            roles are steward config; no role reads or writes EKA
 docs/config.md           the one versioned, strict config schema (roles/drivers/sizing/sandbox/loop) + migration policy
 docs/sizing.md           the deterministic worker-count formula (no LLM input)
 docs/context.md          the bounded, byte-stable context payload (never writes EKA)
+docs/release.md          release train, version source, pinned eka-core/api, ACP posture, install path, independence from the EKA line
+docs/release-checklist.md  the release owner's steps: tag → workflow → confirm assets → verify install
+RELEASE_NOTES.md         paste-ready release notes (pinned core, ACP posture, WI highlights)
 scripts/bump.sh          version bump + tag automation
 anvil.yaml               anvil project + lifecycle definition
 .anvil/pipelines/        CI and release build pipelines
@@ -381,6 +387,21 @@ The four layers, the permission decision table, the pinning rule, and the
 honest residual risks (absolute-path execution bypasses `PATH`; the worktree
 is not confinement; a checksum TOCTOU window) are in
 [`docs/guardrails.md`](docs/guardrails.md).
+
+## Release
+
+`eka-steward` ships on its **own `v*` tag train** in its own repository, with
+its own [`.github/workflows/release.yml`](.github/workflows/release.yml) —
+independent of the `eka-cli` / `eka-mcp` / `eka-core` release train. The
+version is `anvil.yaml` → `project.version`, guarded by the workflow against
+the tag; the binary is stamped with `cmd.version` via `ldflags`. Current
+release: [`RELEASE_NOTES.md`](RELEASE_NOTES.md) (`v2.0.0`).
+
+The pinned dependency, the ACP transport posture, the platform/asset naming
+contract, and the install paths (`install.sh` / `install.ps1` /
+`go install …@v2.0.0`) are documented in [`docs/release.md`](docs/release.md).
+The release owner's step-by-step is
+[`docs/release-checklist.md`](docs/release-checklist.md).
 
 ## Deliberate omissions vs eka-cli
 
