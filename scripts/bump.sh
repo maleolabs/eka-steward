@@ -92,8 +92,20 @@ echo "New version:     $NEW_VERSION"
 # anvil.yaml version field is without 'v' prefix
 anvil project version set "$NEW_VERSION"
 
+# ── Sync the README's steward version axis ─────────────────────────
+# cmd/readme_version_test.go pins the README's "Steward `X.Y.Z`" claim to
+# anvil.yaml's project.version, so a bump that skips the README fails the
+# tagged commit. sed writes to a temp file (portable: no GNU/BSD -i
+# divergence).
+sed "s|Steward \`$CURRENT\`|Steward \`$NEW_VERSION\`|" README.md > README.md.tmp \
+  && mv README.md.tmp README.md
+if ! grep -q "Steward \`$NEW_VERSION\`" README.md; then
+  echo "Error: could not sync the README steward version axis to $NEW_VERSION — update it manually." >&2
+  exit 1
+fi
+
 # ── Commit ─────────────────────────────────────────────────────────
-git add anvil.yaml
+git add anvil.yaml README.md
 git commit -m "chore: bump version to $NEW_VERSION"
 
 # ── Push to origin (current branch) ───────────────────────────────

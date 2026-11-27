@@ -10,11 +10,45 @@ the steward imports **only** the public contract
 `github.com/maleolabs/eka-core/v2/api` and holds no domain logic of its own —
 all knowledge access belongs in eka-core.
 
-Module path: `github.com/maleolabs/eka-steward/v2` · Steward `2.0.0` · `eka-core v2.0.1`
+Module path: `github.com/maleolabs/eka-steward/v2` · Steward `2.1.0` · `eka-core v2.0.1`
 
 ## Scope of this release
 
-`2.0.0` ships the deterministic orchestrator **core**: the ACP **control
+`2.2.0` aligns the CLI's human output with the **eka-cli design system**, so
+`eka steward ...` looks like `eka`, and makes the machine report explicit:
+
+- **Design-system output** (`internal/ui`, `cmd/render.go`) — the same left
+  margin, ANSI 256-color palette, Unicode icons and aligned
+  header/table/summary blocks `eka` renders. `run` prints a themed human report
+  by default; `version` renders through the same style (plain, margin-indented).
+- **`run --json`** — the deterministic machine report (`obs.Report.Write`),
+  byte-identical to the pre-`2.2.0` output, on the raw writer (no margin, no
+  color). Only the human default is restyled; the machine bytes never change.
+
+`2.1.0` added the **runtime surface** on top of the `2.0.0` orchestrator core:
+
+- **`run`** (`internal/app`, `cmd/run.go`) — assembles the production seams
+  (config, EKA runtime, read-only Source, the one write path, the ACP worker
+  dispatcher, the Recorder and the TTY-free approval channel) and drives a
+  project to quiescence under the single-instance lock.
+- **ACP streaming client** (`internal/acp`) — live JSON-RPC 2.0 over an agent's
+  stdio: per-connection version dispatch, `session/update` streaming, permission
+  routing through the guard policy and the human-approval channel, deterministic
+  cancel. Spawn stays in `internal/escapehatch` (streaming `Start`/`Proc`).
+- **Machine protocol** (`internal/protocol`, [`docs/protocol.md`](docs/protocol.md))
+  — the versioned, language-agnostic product boundary: JSON-RPC 2.0 over stdio
+  or a local unix socket (`serve`), with idempotency keys and deterministic
+  responses.
+- **Event stream** (`internal/obs/stream.go`) — ordered, monotonic, redacted
+  notifications over the protocol (`events.subscribe`).
+- **eka-cli plugin** (`internal/plugin`) — official plugin distribution and
+  `eka steward` dispatch (see below).
+- **Hardened credential source** (`internal/secrets/file.go`) — a `StateDir`
+  file-backed resolver (`O_NOFOLLOW`, regular file, current-uid owner, mode
+  `0600`, size cap), the credential source under the plugin host's minimal
+  environment.
+
+`2.0.0` shipped the deterministic orchestrator **core**: the ACP **control
 loop** (`internal/loop` — pure `Plan` vs `Step`, single-instance lock,
 cgroup sizing, checkpoint/resume), the **worker pool** with backpressure
 (`internal/pool`), deterministic work selection (`internal/plan`), the
@@ -22,27 +56,52 @@ per-driver **trust + capabilities** model (`internal/driver`), **role
 guardrails** (`internal/guard`), **human approval** (`internal/approval`),
 the **secrets broker** (`internal/secrets`), **review roles**, the
 **discussion phase**, and **observability** (`internal/obs`). All EKA
-writes go through one path (`internal/ekawrite`). See
-[`RELEASE_NOTES.md`](RELEASE_NOTES.md) and [`docs/release.md`](docs/release.md).
+writes go through one path (`internal/ekawrite`).
 
-## Invocation: standalone binary, no `eka steward` shim
+**Deferred.** OS-keyring / peer-authenticated IPC credential delivery (option
+B/C of `adr:steward-as-eka-cli-plugin`) is **not shipped**: the hardened
+file-backed source (option A) is the accepted v1 design. The follow-up
+(`steward-credential-keyring`) is canceled, not retired, so it stays
+re-activatable.
 
-Steward ships as a standalone binary only:
+See [`RELEASE_NOTES.md`](RELEASE_NOTES.md) and [`docs/release.md`](docs/release.md).
+
+## Invocation: standalone binary + official eka-cli plugin
+
+Steward ships as a **standalone binary** — the primary artifact:
 
 ```sh
-go install github.com/maleolabs/eka-steward/v2/cmd/eka-steward@v2.0.0
+go install github.com/maleolabs/eka-steward/v2/cmd/eka-steward@v2.2.0
 ```
 
 plus the release binaries (`install.sh` / `install.ps1`).
 
-There is deliberately **no `eka steward` shim** that would host the steward
-inside the `eka` CLI. The plugin/proxy host is **deadline-bounded** and runs
-with a **minimal environment** — both hostile to a long-running orchestrator
-that manages child agent processes over ACP. `eka-cli` remains the escape
-hatch for one-shot, in-CLI knowledge operations. Hosting steward behind MCP
-was **rejected as the driver** for the same reasons (a request/response
-tool host is the wrong shape for a supervising loop). See
-[`docs/adr/0001-standalone-binary.md`](docs/adr/0001-standalone-binary.md).
+It is also an **official `eka-cli` plugin**, so `eka-cli` is a human entry
+point with no PATH install:
+
+```sh
+eka plugin install steward     # resolves the official registry entry steward → maleolabs/eka-steward
+eka steward <args>             # dispatches to eka-steward <args>
+```
+
+The install is **checksum-verified** (fail-closed against the release's
+`SHA256SUMS.txt`) and the binary hash is **re-verified on every dispatch**.
+Dispatch inherits the CLI's stdio and propagates the exit code, and the plugin
+host runs the binary under a **bounded environment whitelist**
+(`plugin.PluginEnv()`: `PATH`, `HOME`, `EKA_PLUGIN_DIR`, `EKA_HOME`,
+`SystemRoot`). The plugin shell **adds no deadline** to command
+dispatch (only the manifest/`install` contract probes are bounded), so both the
+one-shot `run` and the long-running `serve` dispatch correctly. Steward
+implements the plugin contract (`manifest --json`, `install --json`;
+`internal/plugin`) and declares no `install`/`mcp` capability.
+
+This **amends** [`docs/adr/0001-standalone-binary.md`](docs/adr/0001-standalone-binary.md):
+steward remains a standalone binary, and the plugin is a **distribution/dispatch
+adapter over it, not a host**. The original concern — a deadline-bounded
+in-process host is the wrong shape for a supervising loop — still holds, which
+is why the plugin dispatches the binary as a subprocess rather than hosting the
+loop. Governing decisions: `adr:steward-as-eka-cli-plugin`,
+`adr:steward-machine-protocol`.
 
 ## Layout
 
@@ -51,9 +110,17 @@ cmd/                     Cobra command tree (the only production package)
   eka-steward/main.go    binary entrypoint → cmd.Execute
   root.go                root command, exit-code contract
   version.go             version var (ldflags) + `version` command
+  run.go, serve.go       `run` (drive to quiescence) + `serve` (machine protocol over stdio/socket)
+  render.go              the themed human `run` report (header + tables + summary) via internal/ui
+  manifest.go, install.go  eka-cli plugin subcommands (`manifest --json`, `install --json`)
   *_test.go              boundary, layout-pin and version tests
-internal/escapehatch/    the one audited subprocess adapter (allow-list)
-internal/secrets/        credential broker: declared-only worker creds, egress policy, scoped git auth
+internal/escapehatch/    the one audited subprocess adapter (allow-list); streaming Start/Proc spawn
+internal/app/            run surface: assembles the production seams, drives the loop to quiescence, single-instance lock
+internal/acp/            live ACP client: JSON-RPC 2.0 over stdio, version dispatch, permission routing, cancel
+internal/protocol/       versioned machine protocol server: JSON-RPC 2.0 over stdio or a unix socket
+internal/plugin/         eka-cli plugin self-description: manifest/install (contract v1)
+internal/ekawrite/       the ONE EKA write path (attribution, replay gate, ADR-032 provenance/adopt)
+internal/secrets/        credential broker: declared-only worker creds, hardened file source, egress policy, scoped git auth
 internal/decision/      pure, deterministic selection/order kernel (stdlib only)
 internal/discuss/       discussion phase: bounded, resumable turns recorded as EKA decisions
 internal/loop/          deterministic control loop (Plan/Step/Run, lock, cgroup sizing, resume state)
@@ -65,6 +132,7 @@ internal/role/          steward worker-role config (parse + resolve; no EKA)
 internal/config/        versioned, strict combined config schema (composes role/driver/sizing; no EKA)
 internal/sizing/        pure worker-count sizing (no I/O, no LLM)
 internal/render/        pure, bounded context-payload renderer (stdlib only)
+internal/ui/            design-system mirror: margin, 256-color palette, icons, aligned header/table/summary (stdlib only)
 internal/plan/          pure dependency-graph planner: topological + container + state order (no I/O, no LLM)
 docs/adr/                architecture decision records
 docs/boundary.md         the two hard boundary rules (api-only, one escape hatch)
@@ -75,11 +143,14 @@ docs/backpressure.md     bounded worker pool: sizing-bounded concurrency, determ
 docs/checkpoint.md       crash-safe checkpoint/resume: intent log, reconcile, crash matrix
 docs/recovery.md         bounded retry, cancel semantics, failure -> no partial write
 docs/upgrade.md          schema migration registry (checkpoint + config), version range, refusal, forward-only rollback note
-docs/observability.md    structured step log, metric names, run report, secret redaction
+docs/observability.md    structured step log, metric names, run report, secret redaction, live event stream
+docs/protocol.md         the versioned machine protocol spec: transport, methods, events, error codes, integration guide, golden transcripts
+docs/write-path.md       the one audited EKA write path: attribution, replay gate, ADR-032 provenance/adopt
 docs/review.md           review stage: policy, deterministic reviewer, review-note gate
 docs/approval.md         human approval: escalation rule, no-TTY channel, typed artifact, bounded wait, resume
 docs/determinism.md      code decides which/when/if, the LLM decides what
 docs/drivers.md          driver registry: config, adapters, probing (never writes EKA)
+docs/acp-spike.md        ACP client spike: live agent/v2 evidence, permission path, structured-context handoff
 docs/guardrails.md       worker containment: four layers, VCS-isolation-not-a-boundary, residual risks
 docs/secrets.md          per-driver credential declarations, the broker, egress allow-list + enforcement gap, scoped git auth
 docs/roles.md            roles are steward config; no role reads or writes EKA
@@ -102,10 +173,27 @@ deliberate, reviewed change.
 ## Usage
 
 ```sh
-eka-steward --version      # bare build version, e.g. 2.0.0
-eka-steward version        # build version + eka-core contract version
+eka-steward --version        # bare build version, e.g. 2.2.0
+eka-steward version          # build version + eka-core contract version
+eka-steward run …            # drive a project to quiescence (human report; --json machine report)
+eka-steward serve …          # host the machine protocol (stdio; --socket <path> for a unix socket)
+eka-steward manifest --json  # the eka-cli plugin self-description
+eka-steward install --json   # the (empty) plugin artifact-install result
 eka-steward --help
 ```
+
+`run` and `serve` share the same flags (`--project`, `--config`, `--role`,
+`--driver`, `--repo`, `--state-dir`, `--dispatch-state`); `--project` is
+required, and `--config`/`--role` are required in production:
+
+```sh
+eka-steward run   --project <id> --config steward.yaml --role implementer
+eka-steward serve --project <id> --config steward.yaml --role implementer
+```
+
+A consumer drives `serve` over the protocol (initialize → plan/step/run → status
+→ shutdown); a minimal stdlib-only client and the golden transcripts are in
+[`docs/protocol.md`](docs/protocol.md).
 
 ## Development
 
@@ -211,9 +299,11 @@ the package that spawns). A driver is **KNOWN only when pinned** (exact
 version + sha256 checksum); `driver.ParseTrusted` / `config.ParseTrusted` are
 the fail-closed acceptance points, and `claude`/`codex` vendor CLI adapters
 carry an in-repo pin/audit table plus a deterministic `capabilities.json`
-artifact. The shape, adapter table, probe seam, trust rule, vendor pin table
-and the deferred streaming ACP client live in
-[`docs/drivers.md`](docs/drivers.md); the parser/seam is `internal/driver`.
+artifact. The shape, adapter table, probe seam, trust rule and vendor pin table
+live in [`docs/drivers.md`](docs/drivers.md); the parser/seam is
+`internal/driver`, and the streaming ACP client that dispatches a worker is
+`internal/acp` (see [`docs/protocol.md`](docs/protocol.md) for the protocol
+boundary).
 
 ## Worker sizing
 
@@ -395,11 +485,13 @@ its own [`.github/workflows/release.yml`](.github/workflows/release.yml) —
 independent of the `eka-cli` / `eka-mcp` / `eka-core` release train. The
 version is `anvil.yaml` → `project.version`, guarded by the workflow against
 the tag; the binary is stamped with `cmd.version` via `ldflags`. Current
-release: [`RELEASE_NOTES.md`](RELEASE_NOTES.md) (`v2.0.0`).
+release: [`RELEASE_NOTES.md`](RELEASE_NOTES.md) (`v2.2.0`).
 
 The pinned dependency, the ACP transport posture, the platform/asset naming
 contract, and the install paths (`install.sh` / `install.ps1` /
-`go install …@v2.0.0`) are documented in [`docs/release.md`](docs/release.md).
+`go install …@v2.2.0`) are documented in [`docs/release.md`](docs/release.md).
+The official plugin install path (`eka plugin install steward`) is in the same
+document.
 The release owner's step-by-step is
 [`docs/release-checklist.md`](docs/release-checklist.md).
 
@@ -415,10 +507,12 @@ repository generator or an EKA repository itself:
   eka-standard and the bootstrap engine in eka-core. Vendoring them here
   would duplicate a source of truth.
 - **No Layer-2 capture hooks / `platform_sync` lifecycle.** There is no
-  vendored `eka-standard/templates/hooks` to symlink, so the anvil
-  `platform_sync` step is dropped (noted in `anvil.yaml`).
-- **No `feedback` / MCP / telemetry surface.** Steward drives agents; it
-  is not the knowledge CLI.
+  vendored `eka-standard/templates/hooks` to symlink, so no `platform_sync`
+  step exists in the anvil pipelines (`anvil.yaml` declares no lifecycle).
+- **No `feedback` / MCP / telemetry surface.** Steward drives agents; it is
+  not the knowledge CLI and is not an MCP server. The eka-cli plugin
+  (`internal/plugin`) declares no `mcp`/`install` capability and installs no
+  artifacts.
 - **CI runs the minimal gate** (format, vet, windows cross-compile, race
   tests). eka-cli's installer e2e jobs and repository-scope `eka verify`
   gate are omitted: steward is not an EKA repository, and its installers
