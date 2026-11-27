@@ -51,6 +51,7 @@ cmd/                     Cobra command tree (the only production package)
   *_test.go              boundary, layout-pin and version tests
 internal/escapehatch/    the one audited subprocess adapter (allow-list)
 internal/decision/      pure, deterministic selection/order kernel (stdlib only)
+internal/discuss/       discussion phase: bounded, resumable turns recorded as EKA decisions
 internal/loop/          deterministic control loop (Plan/Step/Run, lock, cgroup sizing, resume state)
 internal/pool/          bounded worker pool: concurrency + deterministic backpressure (no EKA)
 internal/guard/         worker containment: env allow-list, per-worker worktree, permission policy, driver pinning
@@ -61,6 +62,7 @@ internal/render/        pure, bounded context-payload renderer (stdlib only)
 docs/adr/                architecture decision records
 docs/boundary.md         the two hard boundary rules (api-only, one escape hatch)
 docs/control-loop.md     control loop: seams, pure Plan vs Step, lock, cgroup, state
+docs/discuss.md          discussion phase: lifecycle, code vs LLM split, recorded dec-, resume, next-phase input
 docs/backpressure.md     bounded worker pool: sizing-bounded concurrency, deterministic overflow, metrics
 docs/checkpoint.md       crash-safe checkpoint/resume: intent log, reconcile, crash matrix
 docs/recovery.md         bounded retry, cancel semantics, failure -> no partial write
@@ -198,6 +200,27 @@ gate), so no EKA write is applied twice and completed work is not
 re-dispatched. The checkpoint location, the intent protocol, the reconcile
 rules per write class and the crash matrix are in
 [`docs/checkpoint.md`](docs/checkpoint.md).
+
+## Discussion
+
+`internal/discuss` implements the **discussion phase**: a bounded, resumable,
+deterministic turn loop that drives a worker to produce decisions for one work
+item, records them as EKA knowledge, and derives the execute phase's input from
+that recorded knowledge. **CODE owns the orchestration** — the round count
+(`Config.Rounds`, clamped to `MaxRounds`), the role (validated against
+`internal/role`), and the stop condition; the **worker owns the content**. Each
+round's bounded context is assembled with `internal/render` and handed to the
+worker through the existing `Dispatcher` seam (extended with the payload, as
+review extended it). A decision is recorded as a **`dec-` decision record**
+published through `internal/ekawrite`; because its creation goes through the
+replay gate, a resumed re-issue is a no-op (no `max+1` instance). Each round is
+a checkpointed transaction over the loop's write-ahead intent log, so a kill at
+any boundary resumes without a duplicate record and with a deterministic round
+sequence. `BuildExecuteInput` reads the `dec-` units back through
+`api.Knowledge` — never from in-memory state — and renders the next phase's
+input. The lifecycle, the code-vs-LLM split, the `dec-` choice, the resumability
+protocol and the store-derived next-phase input are in
+[`docs/discuss.md`](docs/discuss.md).
 
 ## Backpressure
 
