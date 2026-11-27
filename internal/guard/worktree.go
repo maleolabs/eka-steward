@@ -9,6 +9,7 @@ import (
 
 	"github.com/maleolabs/eka-steward/v2/internal/ekawrite"
 	"github.com/maleolabs/eka-steward/v2/internal/escapehatch"
+	"github.com/maleolabs/eka-steward/v2/internal/secrets"
 )
 
 // Worktree issues per-worker git worktrees. A worktree gives a worker its
@@ -87,6 +88,20 @@ func (w Worktree) Remove(ctx context.Context, worker string) error {
 func gitEnv() []string {
 	env := ekawrite.WorkerEnv()
 	return append(env, "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1")
+}
+
+// RemoteGitEnv returns the environment for a steward-OWNED git REMOTE operation
+// (e.g. `git push`): the credential-free git base (no HOME, no PATH, no host
+// credential) plus the broker's SCOPED git credentials for remote. The host
+// GH_TOKEN / SSH_AUTH_SOCK are never present — the base carries no credential
+// and only the scoped askpass helper and token are added (docs/secrets.md).
+func RemoteGitEnv(b *secrets.Broker, remote string) ([]string, error) {
+	creds, err := b.GitCreds(remote)
+	if err != nil {
+		return nil, err
+	}
+	env := gitEnv()
+	return append(env, creds...), nil
 }
 
 // sanitizeWorker maps a worker name to a path-safe, deterministic token:

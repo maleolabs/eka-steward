@@ -50,6 +50,7 @@ cmd/                     Cobra command tree (the only production package)
   version.go             version var (ldflags) + `version` command
   *_test.go              boundary, layout-pin and version tests
 internal/escapehatch/    the one audited subprocess adapter (allow-list)
+internal/secrets/        credential broker: declared-only worker creds, egress policy, scoped git auth
 internal/decision/      pure, deterministic selection/order kernel (stdlib only)
 internal/discuss/       discussion phase: bounded, resumable turns recorded as EKA decisions
 internal/loop/          deterministic control loop (Plan/Step/Run, lock, cgroup sizing, resume state)
@@ -76,6 +77,7 @@ docs/approval.md         human approval: escalation rule, no-TTY channel, typed 
 docs/determinism.md      code decides which/when/if, the LLM decides what
 docs/drivers.md          driver registry: config, adapters, probing (never writes EKA)
 docs/guardrails.md       worker containment: four layers, VCS-isolation-not-a-boundary, residual risks
+docs/secrets.md          per-driver credential declarations, the broker, egress allow-list + enforcement gap, scoped git auth
 docs/roles.md            roles are steward config; no role reads or writes EKA
 docs/config.md           the one versioned, strict config schema (roles/drivers/sizing/sandbox/loop) + migration policy
 docs/sizing.md           the deterministic worker-count formula (no LLM input)
@@ -333,6 +335,18 @@ header, unknown kinds first), cutting at a line boundary and never splitting
 a UTF-8 rune. The shape, the budget, the precedence table and the UTF-8 rule
 are in [`docs/context.md`](docs/context.md); the exact bytes are pinned by
 `internal/render/testdata/context.golden`.
+
+## Secrets & egress
+
+A worker receives **only** the credentials its driver **declares**
+(`internal/secrets` + `internal/driver/credentials.go`): the credential-free
+`guard.WorkerEnv` base plus exactly the declared names from an injected
+resolver — never `os.Environ()`, so `GH_TOKEN`, `SSH_AUTH_SOCK`, `AWS_*` and
+`HOME` do not leak. The steward's own git remote ops use a **scoped**,
+broker-provided token, not the host credential. Worker egress is a
+**declarative** allow-list of model endpoints — validated and tested, but
+**not** enforced by the steward (a sandbox/netns/firewall must enforce it). See
+[`docs/secrets.md`](docs/secrets.md).
 
 ## Containment (guardrails)
 
