@@ -59,6 +59,7 @@ internal/render/        pure, bounded context-payload renderer (stdlib only)
 docs/adr/                architecture decision records
 docs/boundary.md         the two hard boundary rules (api-only, one escape hatch)
 docs/control-loop.md     control loop: seams, pure Plan vs Step, lock, cgroup, state
+docs/checkpoint.md       crash-safe checkpoint/resume: intent log, reconcile, crash matrix
 docs/determinism.md      code decides which/when/if, the LLM decides what
 docs/drivers.md          driver registry: config, adapters, probing (never writes EKA)
 docs/roles.md            roles are steward config; no role reads or writes EKA
@@ -168,6 +169,15 @@ lock (crash-safe `flock` on unix, exclusive-create on windows) refuses a
 second steward on the same workspace. The lifecycle, the three seams, the
 lock semantics, the cgroup fallback and the versioned state format are in
 [`docs/control-loop.md`](docs/control-loop.md).
+
+The loop is **crash-safe**: each step is a checkpointed write-ahead
+transaction (intent → dispatch → apply → done), and a restart reconciles any
+in-flight intent without re-dispatching — a same-form re-issue is a no-op
+(a transition at/after its target; a publish through `ekawrite`'s replay
+gate), so no EKA write is applied twice and completed work is not
+re-dispatched. The checkpoint location, the intent protocol, the reconcile
+rules per write class and the crash matrix are in
+[`docs/checkpoint.md`](docs/checkpoint.md).
 
 ## Context payload
 

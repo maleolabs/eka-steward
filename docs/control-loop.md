@@ -15,11 +15,12 @@ next candidate in code (`Plan`) and only runs the worker/LLM inside
 
 ```
 Acquire(lock)            # one steward per EKA_HOME / state dir
-Load(state)              # resume: skip work already done
+Load(checkpoint)         # resume: reconcile in-flight intents, skip work done
+Resume → reconcile each InFlight intent (no dispatch, idempotent)
 loop:
     Plan   → deterministic step sequence over Source + state (no dispatch)
-    Step   → plan + dispatch ONE, then persist the advance
-Run      → Step until nothing is dispatchable
+    Step   → plan + dispatch ONE, checkpointed (intent → dispatch → apply → done)
+Run      → Resume, then Step until nothing is dispatchable
 Release(lock)
 ```
 
@@ -44,8 +45,9 @@ testable:
   non-dispatchable. Priority and created-seq stay `0` in this cut (EKA work
   items carry no such field), so ordering is by state rank then ID — still a
   deterministic total order.
-- **`EkawriteWriter`** expresses the loop's one mutation as a state
-  transition and routes it through `internal/ekawrite`. The loop never names
+- **`EkawriteWriter`** expresses the loop's forward mutation as a state
+  transition (`Advance`) and the resume mutation as an idempotent reconcile
+  (`Reconcile`), both routed through `internal/ekawrite`. The loop never names
   an `api.Authoring` method itself; the boundary test
   (`cmd/boundary_arch_test.go`) would fail if it did.
 
@@ -60,10 +62,18 @@ testable:
   and any input permutation (the order comes from `decision`, not from the
   slice or map iteration).
 - `Step(ctx) (Step, bool, error)` plans the next candidate
-  (`decision.SelectNext`), dispatches it, records the write through `Writer`
-  (when `Config.DispatchState` is set) and marks it done in the state store.
-  It returns `ok=false` when nothing is dispatchable.
-- `Run(ctx)` drives `Step` until nothing is left or `ctx` is cancelled.
+  (`decision.SelectNext`) and runs it as a **checkpointed transaction**: write
+  the intent ahead of dispatch, dispatch, apply the write through `Writer`
+  (when `Config.DispatchState` is set), then move the intent to done. It
+  returns `ok=false` when nothing is dispatchable.
+- `Resume(ctx)` reconciles every in-flight intent left by a previous run
+  **without dispatching** (idempotent: a transition at/after its target and a
+  replay of an identical publish are no-ops), then clears it.
+- `Run(ctx)` runs `Resume`, then drives `Step` until nothing is left or `ctx`
+  is cancelled.
+
+Crash-recovery, the intent log, the checkpoint location and the crash matrix
+live in [`checkpoint.md`](checkpoint.md).
 
 `Step` is JSON-able so the exact sequence for a fixture is frozen in
 `internal/loop/testdata/steps.golden`:
@@ -107,22 +117,30 @@ missing, unreadable or malformed becomes `0` for that term. A zero term
 makes `internal/sizing` clamp to its **1-worker floor**, so an unknown limit
 yields exactly 1 worker rather than a guessed (possibly over-large) count.
 
-## State format (and what is deferred)
+## State format
 
-The loop persists a minimal resume state as versioned JSON, written
-atomically (temp file in the same directory, then `rename`) so a torn write
-never leaves a half-written file. `Done` is sorted and de-duplicated, so
-the file is byte-stable for the same completed set:
+The loop persists its checkpoint as versioned JSON, written atomically (temp
+file in the same directory, then `rename`) so a torn write never leaves a
+half-written file. `Done` is sorted and de-duplicated and the `inFlight`
+intent log is sorted by candidate id, so the file is byte-stable for the same
+logical state:
 
 ```json
-{ "version": 1, "done": ["p/sto:i-1"], "cursor": "" }
+{
+  "version": 2,
+  "done": ["p/sto:i-1"],
+  "inFlight": [
+    { "candidateId": "p/sto:i-2", "kind": "transition",
+      "target": "p/sto:i-2", "to": "todo", "step": { "candidateId": "p/sto:i-2", "kind": "dispatch" } }
+  ]
+}
 ```
 
-On start the loop `Load`s it and skips every id in `done`. A missing file is
-a fresh `version: 1` state; an unsupported version is a deterministic error.
+On start the loop `Load`s it, reconciles every `inFlight` intent, and skips
+every id in `done`. A missing file is a fresh `version: 2` state; a
+`version: 1` file upgrades to `2` (it has no intent log); any other version is
+a deterministic error.
 
-This is **persist + reload only**. Crash-safe reconciliation of a step that
-was dispatched but not yet recorded (the checkpoint/resume hardening) is a
-**separate work item, `sto:checkpoint-resume`**, and is deliberately not
-implemented here. Until then the loop records completion after dispatch; a
-crash in between re-dispatches that one item on restart.
+The checkpoint **location**, the write-ahead intent protocol, the reconcile
+rules per write class, atomicity/versioning and the crash matrix are specified
+in [`checkpoint.md`](checkpoint.md).

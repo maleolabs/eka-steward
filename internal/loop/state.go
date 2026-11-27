@@ -9,22 +9,26 @@ import (
 	"sort"
 )
 
-// stateVersion is the on-disk schema version of the loop state. A file with a
-// different version is refused deterministically rather than guessed at.
-const stateVersion = 1
+// stateVersion is the on-disk schema version of the loop state. Version 2 adds
+// the InFlight write-ahead intent log. Load upgrades a version-1 file (Done
+// only, no intent log) to version 2 in memory; any other version is refused
+// deterministically rather than guessed at (docs/checkpoint.md).
+const stateVersion = 2
 
-// State is the loop's persisted resume state: the identities already
-// dispatched and an optional cursor. It is versioned and written atomically
-// by Store.
-//
-// This is a MINIMAL persist+reload: it records completion so a restart skips
-// finished work. Crash-safe reconciliation of a partially applied step (the
-// checkpoint/resume hardening) is a separate work item
-// (sto:checkpoint-resume) and is deliberately not implemented here.
+// previousStateVersion is the last version Load accepts and upgrades.
+const previousStateVersion = 1
+
+// State is the loop's persisted checkpoint: the identities already completed
+// (Done) and the write-ahead intent log of steps that were persisted but not
+// yet confirmed applied (InFlight). It is versioned and written atomically by
+// Store. On resume every InFlight intent is reconciled BEFORE the loop
+// dispatches anything, so a crash at any boundary of a step is recoverable
+// without re-dispatching or double-applying.
 type State struct {
-	Version int      `json:"version"`
-	Done    []string `json:"done"`
-	Cursor  string   `json:"cursor,omitempty"`
+	Version  int      `json:"version"`
+	Done     []string `json:"done"`
+	Cursor   string   `json:"cursor,omitempty"`
+	InFlight []Intent `json:"inFlight,omitempty"`
 }
 
 // Has reports whether id is recorded done.
@@ -44,8 +48,10 @@ type Store struct {
 	Path string
 }
 
-// Load reads and validates the state file. A missing file yields a fresh
-// Version-1 state (empty Done); an unsupported Version is an error.
+// Load reads and validates the checkpoint file. A missing file yields a fresh
+// Version-2 state (empty Done, empty InFlight); a version-1 file is upgraded to
+// version 2 in memory (it has no intent log); any other version is a
+// deterministic error.
 func (s *Store) Load() (State, error) {
 	b, err := os.ReadFile(s.Path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -58,17 +64,24 @@ func (s *Store) Load() (State, error) {
 	if err := json.Unmarshal(b, &st); err != nil {
 		return State{}, fmt.Errorf("loop: decode state %s: %w", s.Path, err)
 	}
-	if st.Version != stateVersion {
-		return State{}, fmt.Errorf("loop: state %s has version %d, want %d", s.Path, st.Version, stateVersion)
+	switch st.Version {
+	case stateVersion:
+		// current
+	case previousStateVersion:
+		// Upgrade: version 1 carried no intent log.
+		st.Version = stateVersion
+	default:
+		return State{}, fmt.Errorf("loop: state %s has version %d, want %d (or the upgradeable %d)", s.Path, st.Version, stateVersion, previousStateVersion)
 	}
 	return st, nil
 }
 
-// Save writes st atomically. Done is sorted and de-duplicated first so the
-// file is byte-stable for the same completed set.
+// Save writes st atomically. Done and InFlight are normalized first (sorted,
+// de-duplicated) so the file is byte-stable for the same logical state.
 func (s *Store) Save(st State) error {
 	st.Version = stateVersion
 	st.Done = normalizeDone(st.Done)
+	st.InFlight = normalizeInFlight(st.InFlight)
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return fmt.Errorf("loop: encode state: %w", err)
@@ -112,5 +125,28 @@ func normalizeDone(ids []string) []string {
 		out = append(out, id)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// normalizeInFlight sorts the intent log by candidate identity and keeps the
+// last intent per candidate, so the persisted bytes are deterministic and a
+// candidate never carries two intents.
+func normalizeInFlight(in []Intent) []Intent {
+	if len(in) == 0 {
+		return nil
+	}
+	byID := make(map[string]Intent, len(in))
+	ids := make([]string, 0, len(in))
+	for _, it := range in {
+		if _, seen := byID[it.CandidateID]; !seen {
+			ids = append(ids, it.CandidateID)
+		}
+		byID[it.CandidateID] = it
+	}
+	sort.Strings(ids)
+	out := make([]Intent, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, byID[id])
+	}
 	return out
 }
