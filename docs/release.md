@@ -17,8 +17,8 @@ repository** (`github.com/maleolabs/eka-steward`), driven by its **own**
 [`.github/workflows/release.yml`](../.github/workflows/release.yml). It is
 **not** coupled to the `eka-cli` / `eka-mcp` / `eka-core` release train:
 
-- Tags are per-repository. `eka-steward`'s `v2.0.0` is a distinct object
-  from any `v2.0.0` in `eka-cli`, `eka-mcp` or `eka-core`; there is no shared
+- Tags are per-repository. `eka-steward`'s `v2.2.0` is a distinct object
+  from any `v2.2.0` in `eka-cli`, `eka-mcp` or `eka-core`; there is no shared
   tag, no shared workflow, and no cross-repo tag trigger.
 - The version is decided **here** (the git tag / workflow input), guarded
   against **this repo's** `anvil.yaml`. No other repository's version gates a
@@ -33,14 +33,14 @@ repository** (`github.com/maleolabs/eka-steward`), driven by its **own**
 
 | Where | Value | Role |
 | --- | --- | --- |
-| `anvil.yaml` → `project.version` | `2.0.0` | the project version; the workflow **guards** the release against it |
-| git tag | `v2.0.0` | triggers the release workflow (tag push); the `v` is the tag spelling only |
-| binary (`cmd.version`) | `2.0.0` | stamped at build via `-ldflags "-X github.com/maleolabs/eka-steward/v2/cmd.version=<ver>"` |
+| `anvil.yaml` → `project.version` | `2.2.0` | the project version; the workflow **guards** the release against it |
+| git tag | `v2.2.0` | triggers the release workflow (tag push); the `v` is the tag spelling only |
+| binary (`cmd.version`) | `2.2.0` | stamped at build via `-ldflags "-X github.com/maleolabs/eka-steward/v2/cmd.version=<ver>"` |
 | `api.ContractVersion` | `v1` | the `eka-core` **contract** version the binary was compiled against (distinct axis — see below) |
 
 The build stamps `cmd.version` from `git describe --tags --always` with the
 leading `v` stripped, so the binary reports the same spelling as
-`anvil.yaml` (`2.0.0`), not the tag spelling (`v2.0.0`). A default (unstamped)
+`anvil.yaml` (`2.2.0`), not the tag spelling (`v2.2.0`). A default (unstamped)
 build reports `dev`. See
 [`.anvil/pipelines/build.yaml`](../.anvil/pipelines/build.yaml).
 
@@ -68,9 +68,9 @@ github.com/maleolabs/eka-core/v2 v2.0.1
 
 ### Compatibility statement
 
-> **eka-steward `2.0.0` is compiled against and depends on
+> **eka-steward `2.2.0` is compiled against and depends on
 > `github.com/maleolabs/eka-core/v2 v2.0.1` (the `api` package only).** The
-> steward build version (`cmd.version`, this release: `2.0.0`) and the
+> steward build version (`cmd.version`, this release: `2.2.0`) and the
 > `eka-core` public-contract version (`api.ContractVersion`, currently `v1`)
 > are **separate axes**: the build version names the steward implementation,
 > the contract version names the wire/contract surface of `eka-core`. Moving
@@ -108,7 +108,8 @@ posture is fixed by the published ADR `adr:steward-acp-bridge` (drafted in
 - **Subprocess boundary.** The stdio **spawn** stays in the audited
   [`internal/escapehatch`](../internal/escapehatch/escapehatch.go) family —
   the **only** package in the repo that imports `os/exec` (enforced by test).
-  A streaming-stdio adapter is added there; no other package may spawn.
+  The streaming-stdio adapter is `escapehatch.Start` (wired stdin/stdout pipes);
+  no other package may spawn.
 
 ## Distribution / install path
 
@@ -127,15 +128,15 @@ SHA256SUMS.txt                     # checksums over every asset
 
 ```sh
 # Linux / macOS
-curl -fsSL https://github.com/maleolabs/eka-steward/releases/download/v2.0.0/install.sh | sh
+curl -fsSL https://github.com/maleolabs/eka-steward/releases/download/v2.2.0/install.sh | sh
 # pin a version / target dir:
-curl -fsSL .../v2.0.0/install.sh | sh -s -- --version v2.0.0 --to ~/.local/bin
+curl -fsSL .../v2.2.0/install.sh | sh -s -- --version v2.2.0 --to ~/.local/bin
 ```
 
 ```powershell
 # Windows (PowerShell 5.1+ / 7+)
-$s = irm https://github.com/maleolabs/eka-steward/releases/download/v2.0.0/install.ps1
-iex "$s -Version v2.0.0"
+$s = irm https://github.com/maleolabs/eka-steward/releases/download/v2.2.0/install.ps1
+iex "$s -Version v2.2.0"
 ```
 
 Verification is **fail-closed**: the installer requires `SHA256SUMS.txt` and
@@ -147,7 +148,7 @@ emits windows amd64/arm64 `.exe` assets.)
 **Path B — `go install`.**
 
 ```sh
-go install github.com/maleolabs/eka-steward/v2/cmd/eka-steward@v2.0.0
+go install github.com/maleolabs/eka-steward/v2/cmd/eka-steward@v2.2.0
 ```
 
 **Path C — source artifact.** The release attaches the `anvil artifact
@@ -170,10 +171,10 @@ export GOPROXY=off GOSUMDB=off
 go build ./...                                              # whole tree
 GOOS=windows GOARCH=amd64 go build ./...                    # the windows gate
 go build -o eka-steward ./cmd/eka-steward                   # the binary (unstamped → "dev")
-go build -ldflags="-X github.com/maleolabs/eka-steward/v2/cmd.version=2.0.0" \
+go build -ldflags="-X github.com/maleolabs/eka-steward/v2/cmd.version=2.2.0" \
     -o eka-steward ./cmd/eka-steward                        # stamped, as the release build does
 ```
 
-`go install github.com/maleolabs/eka-steward/v2/cmd/eka-steward@v2.0.0`
+`go install github.com/maleolabs/eka-steward/v2/cmd/eka-steward@v2.2.0`
 requires the tag to exist — that tag is created by the release owner, not by
 this document.

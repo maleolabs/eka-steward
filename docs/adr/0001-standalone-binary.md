@@ -4,6 +4,13 @@
 - Date: 2026-11-27
 - Deciders: EKA Steward maintainers
 
+> **Superseded in part (v2.1.0).** The "no `eka steward` shim is built in this
+> line" decision below is amended by `adr:steward-as-eka-cli-plugin`: steward
+> now ships as an **official eka-cli plugin** that *dispatches the standalone
+> binary as a subprocess*. The binding constraint here — no deadline-bounded
+> **in-process** host for the loop, and any delegation must be a deadline-free
+> subprocess — still holds and is honored by the shipped plugin.
+
 ## Context
 
 `eka-steward` orchestrates AI coding-agent CLIs over ACP to drive an EKA

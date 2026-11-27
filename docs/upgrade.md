@@ -120,8 +120,8 @@ statement for a rollback:
   and is **durable EKA knowledge**. An applied transition, publish, note or
   approval artifact is persisted in the workspace, not in the steward.
 - Reverting steward (and its pinned eka-core `api` contract — `go.mod` currently
-  pins `eka-core v2.0.1`, steward `2.0.0`, see `README.md`) changes **future
-  behaviour only**. It does **not** undo, roll back or rewrite any EKA write the
+  pins `eka-core v2.0.1`, and the steward binary is the current steward release,
+  see `README.md`) changes **future behaviour only**. It does **not** undo, roll back or rewrite any EKA write the
   engine already applied. Those writes are **forward-only**; undoing one is a new
   explicit EKA mutation, never a side effect of downgrading the binary.
 - A resumed reconcile after a downgrade is exactly as safe as after an upgrade:

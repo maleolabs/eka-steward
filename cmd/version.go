@@ -28,9 +28,13 @@ func newVersionCommand() *cobra.Command {
 and the eka-core public-contract version it was compiled against.`,
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
-			out := c.OutOrStdout()
-			fmt.Fprintf(out, "eka-steward %s\n", version)
-			fmt.Fprintf(out, "eka-core api %s\n", api.ContractVersion)
+			// Plain (no color) two-axis report, rendered through the
+			// design-system Style so it carries the container's left
+			// margin like every other human command. The byte layout is
+			// unchanged apart from the margin.
+			s := styleFor(c)
+			fmt.Fprintf(s.W, "eka-steward %s\n", version)
+			fmt.Fprintf(s.W, "eka-core api %s\n", api.ContractVersion)
 			return nil
 		},
 	}

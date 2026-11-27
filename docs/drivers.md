@@ -8,7 +8,7 @@ and it resolves **deterministically** to a launch spec (`cmd` + `args`) plus
 the wire **kind** the steward uses to talk to it. Drivers live in a steward
 config file and nowhere else. The package (`internal/driver`) parses and
 resolves those bytes; it does not run a worker session or implement the
-streaming ACP client — those are separate work items.
+streaming ACP client itself — the live client is [`internal/acp`](#relation-to-the-streaming-acp-client).
 
 ## Config shape
 
@@ -135,20 +135,30 @@ that declares a tool with no adapter (`driver: unknown tool "ghost"`);
 
 An empty driver list (`drivers: []`) is a valid empty registry.
 
-## Relation to the streaming ACP client (deferred)
+## Relation to the streaming ACP client
 
 `ACPProbe` is a **one-shot** capability probe: it reads the agent's single
 `initialize` response and stops. It is **not** the streaming ACP client.
 
-The `Runner` returns whole captured stdout, and `internal/escapehatch.Run`
-has no stdin pipe yet, so the real `initialize` request cannot be fed to
-`opencode acp` through `ExecRunner` today. That is why the ACP probe is
-implemented and tested against the `Runner` seam (fake runner), and real
-subprocess probing in this work item is limited to CLI adapters
-(`claude --version`, `codex --version`), which need no stdin. The streaming
-ACP client — a real stdio pipe, permission round-trips, prompt turns — is a
-**later work item** (see the ADR draft in [`docs/acp-spike.md`](acp-spike.md)
-§11) and will add the audited stdin-bearing adapter there.
+The streaming client ships as [`internal/acp`](../internal/acp/message.go) — the
+steward's live Agent Client Protocol client. It is a **consumer** of this
+package, not the reverse: it takes the resolved `driver.Spec` (whose `Kind` must
+be `driver.KindACP`), launches the agent's stdio through
+[`internal/escapehatch`](../internal/escapehatch/escapehatch.go) (`AllowList.Start`,
+the stdin-bearing adapter), negotiates the protocol version per connection, drives
+one `session/prompt` turn while streaming `session/update` increments, and answers
+`session/request_permission` / `fs/*` / `terminal/*` through the guard policy and
+the human-approval channel. This package still owns the driver record, the
+adapter table and the one-shot probe, and does not import `internal/acp`.
+
+The `Runner` returns whole captured stdout, and `ExecRunner` (this package's
+production probe) still uses `escapehatch.Run`, which has no stdin pipe — so a
+real `initialize` request cannot be fed to `opencode acp` through `ExecRunner`.
+The ACP probe is therefore implemented and tested against the `Runner` seam (fake
+runner), and real subprocess probing in this package is limited to CLI adapters
+(`claude --version`, `codex --version`), which need no stdin. The streaming path —
+a real stdio pipe, permission round-trips, prompt turns — lives in `internal/acp`
+over `escapehatch.Start`.
 ## Trust model — KNOWN vs UNKNOWN, fail-closed
 
 A driver is **KNOWN** only when it carries **both** an exact `version` and a

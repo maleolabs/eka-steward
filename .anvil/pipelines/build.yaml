@@ -22,8 +22,8 @@ pipeline:
             # platforms of install.sh (POSIX) and install.ps1 (PowerShell).
             #
             # `git describe` yields vX.Y.Z; the leading `v` is stripped so
-            # the binary reports the same version as anvil.yaml (2.0.0),
-            # not the git tag spelling (v2.0.0).
+            # the binary reports the same version as anvil.yaml (2.2.0),
+            # not the git tag spelling (v2.2.0).
             - name: linux-amd64
               command: sh
               args:

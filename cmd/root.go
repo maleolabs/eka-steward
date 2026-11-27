@@ -8,9 +8,11 @@
 // private implementation details. cmd/boundary_arch_test.go enforces the
 // boundary, and cmd/layout_test.go pins the top-level layout.
 //
-// Scope of this cut: a scaffold. The ACP control loop, the driver
-// registry and the ACP client are separate work items and are
-// deliberately absent — no abstraction is pre-built for them.
+// Scope of this cut: the standing surface. `run` drives a project to
+// quiescence through the ACP control loop; `serve` hosts the versioned
+// JSON-RPC 2.0 machine protocol over stdio or a unix socket; `manifest
+// --json` and `install --json` speak the eka-cli plugin contract (v1);
+// `version` reports the build and eka-core contract versions.
 package cmd
 
 import (
@@ -59,9 +61,13 @@ It is a thin, deterministic standalone binary and a consumer of
 eka-core's public contract (github.com/maleolabs/eka-core/v2/api): it
 holds no domain logic of its own.
 
-This is a scaffold release: the version surface is available; the ACP
-control loop, the driver registry and the ACP client ship in later work
-items.
+Commands:
+  run              drive a project to quiescence along the control loop
+  serve            host the versioned JSON-RPC 2.0 machine protocol
+                   (stdio, or a unix socket with --socket)
+  manifest --json  print the eka-cli plugin contract (v1) manifest
+  install --json   report the (empty) plugin artifact install result
+  version          print the build and eka-core contract versions
 
 Run 'eka-steward version' for the build and contract versions.`,
 		// The binary owns all error output: SilenceErrors + SilenceUsage
