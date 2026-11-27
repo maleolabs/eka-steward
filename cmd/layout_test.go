@@ -30,6 +30,7 @@ var expectedRootEntries = []string{
 	"go.sum",
 	"install.ps1",
 	"install.sh",
+	"internal",
 	"scripts",
 }
 

@@ -1,0 +1,24 @@
+# eka/sto:context-renderer — bounded context payload
+
+## Instructions
+
+- Render deterministically.
+- Never write EKA.
+
+## Constraints
+
+- stdlib only.
+- No new dependency.
+
+## Acceptance
+
+- Byte-stable output.
+- Budget enforced.
+
+## Knowledge
+
+docs/context.md describes the payload shape.
+
+## Note
+
+The caller maps EKA knowledge into Input.
