@@ -16,9 +16,11 @@ Module path: `github.com/maleolabs/eka-steward/v2` · Steward `2.0.0` · `eka-co
 
 `2.0.0` is a **scaffold**. It ships the product identity, the module
 contract, the CI/release pipeline and the version surface. The pieces that
-make it an orchestrator — the ACP **control loop**, the **driver registry**
-and the **ACP client** — are separate work items and are deliberately
-**absent** here. No abstraction is pre-built for them.
+make it an orchestrator — the ACP **control loop** and the **ACP client** —
+are separate work items and are deliberately **absent** here. No
+abstraction is pre-built for them. The deterministic **driver registry**
+(`internal/driver`, see [`docs/drivers.md`](docs/drivers.md)) lands on the
+same foundation.
 
 ## Invocation: standalone binary, no `eka steward` shim
 
@@ -49,12 +51,14 @@ cmd/                     Cobra command tree (the only production package)
   *_test.go              boundary, layout-pin and version tests
 internal/escapehatch/    the one audited subprocess adapter (allow-list)
 internal/decision/      pure, deterministic selection/order kernel (stdlib only)
+internal/driver/        deterministic driver registry (parse/resolve/select + probe seam)
 internal/role/          steward worker-role config (parse + resolve; no EKA)
 internal/sizing/        pure worker-count sizing (no I/O, no LLM)
 internal/render/        pure, bounded context-payload renderer (stdlib only)
 docs/adr/                architecture decision records
 docs/boundary.md         the two hard boundary rules (api-only, one escape hatch)
 docs/determinism.md      code decides which/when/if, the LLM decides what
+docs/drivers.md          driver registry: config, adapters, probing (never writes EKA)
 docs/roles.md            roles are steward config; no role reads or writes EKA
 docs/sizing.md           the deterministic worker-count formula (no LLM input)
 docs/context.md          the bounded, byte-stable context payload (never writes EKA)
@@ -120,6 +124,22 @@ EKA**. The config shape, resolution rules and strictness rules live in
 [`docs/roles.md`](docs/roles.md); the parser/validator is
 `internal/role` (stdlib + `gopkg.in/yaml.v3` only; imports no EKA
 package and no filesystem/network/subprocess).
+
+## Drivers
+
+A *driver* is how the steward launches and talks to one coding-agent CLI —
+steward config, never EKA knowledge. Drivers are declared **strictly** as
+`{tool, cmd, args}` under a `drivers:` list; the wire **kind** is derived
+from the tool's registered adapter, not configured. Known tools:
+`opencode`/`gemini` are `acp` (JSON-RPC over stdio), `claude`/`codex` are
+`cli` (no ACP). Resolution and selection are deterministic; an unknown tool
+is a named error (`driver.ErrUnknownTool`). Capability probing is **recorded**
+on the resolved driver (`Capabilities{Kind, Version, ACPVersion, Raw}`)
+through a `Runner` seam — a fake in unit tests, an
+`internal/escapehatch`-backed `ExecRunner` in production (the only file in
+the package that spawns). The shape, adapter table, probe seam and the
+deferred streaming ACP client live in [`docs/drivers.md`](docs/drivers.md);
+the parser/seam is `internal/driver`.
 
 ## Worker sizing
 
