@@ -53,6 +53,7 @@ internal/escapehatch/    the one audited subprocess adapter (allow-list)
 internal/decision/      pure, deterministic selection/order kernel (stdlib only)
 internal/loop/          deterministic control loop (Plan/Step/Run, lock, cgroup sizing, resume state)
 internal/pool/          bounded worker pool: concurrency + deterministic backpressure (no EKA)
+internal/guard/         worker containment: env allow-list, per-worker worktree, permission policy, driver pinning
 internal/driver/        deterministic driver registry (parse/resolve/select + probe seam)
 internal/role/          steward worker-role config (parse + resolve; no EKA)
 internal/sizing/        pure worker-count sizing (no I/O, no LLM)
@@ -64,6 +65,7 @@ docs/backpressure.md     bounded worker pool: sizing-bounded concurrency, determ
 docs/checkpoint.md       crash-safe checkpoint/resume: intent log, reconcile, crash matrix
 docs/determinism.md      code decides which/when/if, the LLM decides what
 docs/drivers.md          driver registry: config, adapters, probing (never writes EKA)
+docs/guardrails.md       worker containment: four layers, VCS-isolation-not-a-boundary, residual risks
 docs/roles.md            roles are steward config; no role reads or writes EKA
 docs/sizing.md           the deterministic worker-count formula (no LLM input)
 docs/context.md          the bounded, byte-stable context payload (never writes EKA)
@@ -211,6 +213,31 @@ header, unknown kinds first), cutting at a line boundary and never splitting
 a UTF-8 rune. The shape, the budget, the precedence table and the UTF-8 rule
 are in [`docs/context.md`](docs/context.md); the exact bytes are pinned by
 `internal/render/testdata/context.golden`.
+
+## Containment (guardrails)
+
+Every worker runs **contained by default**, with **no opt-out in v1**
+(`internal/guard`). Four independent layers:
+
+- **Environment** — `guard.WorkerEnv` reuses `ekawrite.WorkerEnv`: a worker
+  runs with the allow-listed env only (no `HOME`, no `EKA_HOME`, no `PATH`,
+  no credential variable), so the default EKA store path and host
+  credential dotfiles are not derivable from the ambient environment.
+- **Worktree** — each worker gets its own git worktree via
+  `internal/escapehatch` (allow-list `git`). This is **VCS isolation, not a
+  security boundary**: it separates checkouts, it does not confine
+  filesystem access.
+- **Permission policy** — an ACP permission request is **default-deny**:
+  only a `read`-class request inside the workspace root may be allowed;
+  every wait is **bounded** so a worker **never hangs**; an unknown
+  `optionId` is never approval.
+- **Driver pinning** — `guard.RequirePinned` refuses any driver without an
+  exact `version` and sha256 `checksum`, and verifies the resolved binary.
+
+The four layers, the permission decision table, the pinning rule, and the
+honest residual risks (absolute-path execution bypasses `PATH`; the worktree
+is not confinement; a checksum TOCTOU window) are in
+[`docs/guardrails.md`](docs/guardrails.md).
 
 ## Deliberate omissions vs eka-cli
 

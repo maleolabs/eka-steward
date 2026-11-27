@@ -22,6 +22,8 @@ drivers:
   - tool: opencode          # must name a known tool (an adapter exists)
     cmd: opencode
     args: [acp]             # `opencode acp` speaks ACP on stdio
+    version: 2.4.1          # optional pin (guard.RequirePinned)
+    checksum: <sha256 hex>  # optional pin (guard.RequirePinned)
 
   - tool: claude            # Claude Code — no ACP, CLI adapter
     cmd: claude
@@ -35,6 +37,8 @@ drivers:
 | `tool` | yes | unique tool name; must have a registered adapter; non-empty |
 | `cmd` | yes | executable base name (checked against the escape-hatch allow-list at run time); non-empty |
 | `args` | no | argv passed to `cmd` verbatim |
+| `version` | no | exact tool version (a **pin**: `guard.RequirePinned` refuses a driver without it) |
+| `checksum` | no | sha256 (lowercase hex) of the resolved binary (a **pin**: `guard.RequirePinned` verifies it) |
 
 ## Adapter kinds
 

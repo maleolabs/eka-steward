@@ -63,11 +63,18 @@ var ErrUnknownTool = errors.New("driver: unknown tool")
 // Cmd is the executable base name — it is checked against the escape-hatch
 // AllowList at run time. Args are passed verbatim to Cmd. Kind is derived
 // by Parse from the tool's adapter, never read from config.
+//
+// Version and Checksum are the OPTIONAL pin: Parse accepts a driver
+// without them, but guard.RequirePinned refuses any driver that lacks
+// either, and verifies the resolved binary's sha256 against Checksum
+// (lowercase hex). Pinning is a containment gate, not a parse rule.
 type Spec struct {
-	Tool string
-	Cmd  string
-	Args []string
-	Kind Kind
+	Tool     string
+	Cmd      string
+	Args     []string
+	Kind     Kind
+	Version  string
+	Checksum string
 }
 
 // Capabilities is the recorded result of probing a driver. It is stored on
@@ -101,9 +108,11 @@ type config struct {
 }
 
 type driverConfig struct {
-	Tool string   `yaml:"tool"`
-	Cmd  string   `yaml:"cmd"`
-	Args []string `yaml:"args"`
+	Tool     string   `yaml:"tool"`
+	Cmd      string   `yaml:"cmd"`
+	Args     []string `yaml:"args"`
+	Version  string   `yaml:"version"`
+	Checksum string   `yaml:"checksum"`
 }
 
 // Parse decodes and validates a driver config. Parsing is strict:
@@ -126,7 +135,7 @@ func Parse(data []byte) (*Registry, error) {
 
 	specs := make([]Spec, len(cfg.Drivers))
 	for i, d := range cfg.Drivers {
-		specs[i] = Spec{Tool: d.Tool, Cmd: d.Cmd, Args: d.Args}
+		specs[i] = Spec{Tool: d.Tool, Cmd: d.Cmd, Args: d.Args, Version: d.Version, Checksum: d.Checksum}
 	}
 	sort.Slice(specs, func(i, j int) bool { return specs[i].Tool < specs[j].Tool })
 

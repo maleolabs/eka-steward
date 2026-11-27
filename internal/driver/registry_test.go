@@ -208,3 +208,14 @@ func TestParseErrorsAreDeterministic(t *testing.T) {
 		t.Fatalf("parse error not deterministic: %v vs %v", err1, err2)
 	}
 }
+
+func TestParseAcceptsPinningFields(t *testing.T) {
+	r := mustParse(t, "drivers:\n  - tool: claude\n    cmd: claude\n    version: 1.2.3\n    checksum: abcDEF\n")
+	s, err := r.Resolve("claude")
+	if err != nil {
+		t.Fatalf("Resolve(claude): %v", err)
+	}
+	if s.Version != "1.2.3" || s.Checksum != "abcDEF" {
+		t.Fatalf("Spec = %+v, want Version=1.2.3 Checksum=abcDEF", s)
+	}
+}
