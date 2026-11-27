@@ -1,11 +1,3 @@
-# eka-steward project definition (anvil delivery lifecycle).
-#
-# The platform_sync lifecycle step present in eka-cli is deliberately
-# dropped here: it symlinks the EKA Layer-2 capture git hooks from the
-# vendored eka-standard templates, and steward vendors no standard
-# declaration, hooks or templates (it is not a repository generator).
-# The only lifecycle this repository needs is the CI/build pipelines in
-# .anvil/pipelines/.
 artifact:
     exclude:
         - .git/**
@@ -20,4 +12,4 @@ artifact:
 project:
     description: EKA Steward — deterministic standalone orchestrator that drives an EKA project over ACP
     name: eka-steward
-    version: 2.0.0
+    version: 2.1.0
