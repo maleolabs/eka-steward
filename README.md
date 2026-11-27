@@ -64,6 +64,7 @@ docs/control-loop.md     control loop: seams, pure Plan vs Step, lock, cgroup, s
 docs/backpressure.md     bounded worker pool: sizing-bounded concurrency, deterministic overflow, metrics
 docs/checkpoint.md       crash-safe checkpoint/resume: intent log, reconcile, crash matrix
 docs/recovery.md         bounded retry, cancel semantics, failure -> no partial write
+docs/review.md           review stage: policy, deterministic reviewer, review-note gate
 docs/determinism.md      code decides which/when/if, the LLM decides what
 docs/drivers.md          driver registry: config, adapters, probing (never writes EKA)
 docs/guardrails.md       worker containment: four layers, VCS-isolation-not-a-boundary, residual risks
@@ -132,6 +133,20 @@ EKA**. The config shape, resolution rules and strictness rules live in
 [`docs/roles.md`](docs/roles.md); the parser/validator is
 `internal/role` (stdlib + `gopkg.in/yaml.v3` only; imports no EKA
 package and no filesystem/network/subprocess).
+
+### Review
+
+When `loop.Config.Review` is enabled, a worker's output is routed to a
+**deterministically-selected review role distinct from the author** before the
+work item completes. `SelectReviewer` takes the sorted `ReviewRoles()` and skips
+the author role — same input, same reviewer; no eligible reviewer is a
+deterministic error, never a self-review. The verdict (`approve` /
+`changes-requested`; `reject` is an alias) is recorded through
+`internal/ekawrite` as a **resolved EKA review note** (the `eka note --role
+review` convention), and the loop advances/marks done **only** on approval. The
+zero-value policy disables review entirely, so the loop is byte-identical to the
+pre-review loop. The policy, the selection rule, the note convention, the gate
+and the crash-safety boundary are in [`docs/review.md`](docs/review.md).
 
 ## Drivers
 

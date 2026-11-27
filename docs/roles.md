@@ -73,3 +73,10 @@ output.
 `review` is **optional**: absent or `review: false` both mean a
 non-review role (the field is ignored when false, not required). An empty
 role list (`roles: []`) is a valid empty set; blank bytes are an error.
+
+## Review roles
+
+Roles flagged `review: true` are the pool the steward's review stage selects a
+reviewer from. Selection is deterministic (first `ReviewRoles()` name that is
+not the author role); the review policy, the outcome recording and the
+completion gate are in [`docs/review.md`](review.md).

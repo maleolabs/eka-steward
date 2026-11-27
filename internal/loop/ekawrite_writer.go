@@ -74,6 +74,23 @@ func (e EkawriteWriter) Reconcile(_ context.Context, in Intent) (ReconcileResult
 	}, nil
 }
 
+// Review records one review outcome as a resolved review note through
+// ekawrite, the single write path. The note discusses the candidate line; a
+// non-approving verdict is written as changes-requested (the note schema's
+// only non-approval verdict).
+func (e EkawriteWriter) Review(_ context.Context, c decision.Candidate, rec ReviewRecord) error {
+	if e.Writer == nil {
+		return fmt.Errorf("loop: EkawriteWriter has no ekawrite.Writer")
+	}
+	_, err := e.Writer.Review(ekawrite.ReviewInput{
+		RepoPath: e.RepoPath,
+		Target:   c.ID,
+		Verdict:  rec.Verdict,
+		Notes:    rec.Notes,
+	})
+	return err
+}
+
 // toExchangeRelationships maps the loop's minimal edge to the exchange type
 // ekawrite consumes.
 func toExchangeRelationships(rels []Relationship) []exchange.Relationship {

@@ -148,6 +148,11 @@ type Config struct {
 	// recorder that returns immediately, so a retry run never waits on the
 	// wall clock while still asserting the exact delay sequence.
 	Sleep func(time.Duration)
+	// Review configures the review stage. Its zero value disables review, so
+	// the loop is byte-identical to the pre-review loop; enabling it routes a
+	// worker's output to a deterministic review role and gates completion on
+	// the verdict (docs/review.md).
+	Review ReviewPolicy
 }
 
 // Loop is the deterministic control loop. Construct it with New. The sequential
@@ -256,10 +261,21 @@ func (l *Loop) Step(ctx context.Context) (Step, bool, error) {
 func (l *Loop) stepOne(ctx context.Context, c decision.Candidate) (Step, error) {
 	step := stepFor(c)
 
+	// Review-required path: dispatch the author, run the review stage, and
+	// only on approval persist the transition intent and apply. The intent is
+	// deferred until AFTER approval, so a crash during the author dispatch or
+	// the review leaves NO in-flight intent — resume never advances an
+	// un-reviewed item (docs/review.md).
+	if required, err := l.cfg.Review.requires(); err != nil {
+		return step, err
+	} else if required {
+		return step, l.reviewedStep(ctx, c, step)
+	}
+
 	// No write path configured: the run is plan/dispatch only and carries no
 	// checkpoint, so there is nothing to reconcile on resume.
 	if l.writer == nil || l.cfg.DispatchState == "" {
-		if err := l.dispatchWithRetry(ctx, c, nil, nil); err != nil {
+		if _, err := l.dispatchWithRetry(ctx, c, nil, nil); err != nil {
 			return step, err
 		}
 		if err := l.markDone(c.ID); err != nil {
@@ -282,7 +298,7 @@ func (l *Loop) stepOne(ctx context.Context, c decision.Candidate) (Step, error) 
 	// Write-ahead: persist the intent BEFORE each attempt and roll it back on
 	// failure, so a normal dispatch (or timeout) failure leaves no intent and
 	// no partial write; only a crash leaves the intent for resume.
-	if err := l.dispatchWithRetry(ctx, c, begin, rollback); err != nil {
+	if _, err := l.dispatchWithRetry(ctx, c, begin, rollback); err != nil {
 		return step, err
 	}
 	l.crash(BoundaryAfterDispatch)
@@ -299,6 +315,71 @@ func (l *Loop) stepOne(ctx context.Context, c decision.Candidate) (Step, error) 
 	return step, nil
 }
 
+// reviewedStep runs one review-required step: dispatch the author, run the
+// review stage, record the outcome, and either apply the transition (approved)
+// or leave the candidate un-done (not approved). The transition intent is
+// persisted only after approval, so resume never completes an un-reviewed item.
+func (l *Loop) reviewedStep(ctx context.Context, c decision.Candidate, step Step) error {
+	rec, ok := l.writer.(ReviewRecorder)
+	if l.writer == nil || !ok {
+		return fmt.Errorf("loop: review required for %s but the writer cannot record a review", c.ID)
+	}
+
+	res, err := l.dispatchWithRetry(ctx, c, nil, nil)
+	if err != nil {
+		return err
+	}
+	l.crash(BoundaryAfterDispatch)
+
+	outcome, err := l.runReview(ctx, c, res.Output)
+	if err != nil {
+		return err
+	}
+	if err := l.recordReview(ctx, rec, c, outcome); err != nil {
+		return fmt.Errorf("loop: record review of %s: %w", c.ID, err)
+	}
+	if !outcome.Approved() {
+		return &ReviewRefusal{
+			CandidateID: c.ID,
+			Reviewer:    outcome.Reviewer,
+			Verdict:     outcome.Verdict,
+			Notes:       outcome.Notes,
+		}
+	}
+
+	// Approved: apply the step. Without a write path the run is plan/dispatch
+	// only; otherwise the transition runs as its own write-ahead transaction.
+	if l.cfg.DispatchState == "" {
+		if err := l.markDone(c.ID); err != nil {
+			return err
+		}
+		l.observe(step)
+		return nil
+	}
+
+	if err := l.beginIntent(Intent{
+		CandidateID: c.ID,
+		Kind:        IntentTransition,
+		Target:      c.ID,
+		To:          l.cfg.DispatchState,
+		Step:        step,
+	}); err != nil {
+		return err
+	}
+	l.crash(BoundaryAfterIntent)
+
+	if err := l.advance(ctx, c); err != nil {
+		return fmt.Errorf("loop: record %s: %w", c.ID, err)
+	}
+	l.crash(BoundaryAfterApply)
+
+	if err := l.completeIntent(c.ID); err != nil {
+		return err
+	}
+	l.observe(step)
+	return nil
+}
+
 // dispatchWithRetry runs the bounded, deterministic dispatch retry loop for one
 // candidate. For each attempt it calls begin (persisting the write-ahead
 // intent; nil when there is no write path), runs the worker under the
@@ -312,7 +393,7 @@ func (l *Loop) stepOne(ctx context.Context, c decision.Candidate) (Step, error) 
 // un-Done. A retry is reported to the Metrics seam exactly once per
 // re-dispatch, so the count is deterministic: MaxAttempts attempts yield
 // MaxAttempts-1 retries when every attempt fails.
-func (l *Loop) dispatchWithRetry(ctx context.Context, c decision.Candidate, begin, rollback func() error) error {
+func (l *Loop) dispatchWithRetry(ctx context.Context, c decision.Candidate, begin, rollback func() error) (DispatchResult, error) {
 	max := l.cfg.Retry.MaxAttempts
 	if max < 1 {
 		max = 1
@@ -321,15 +402,16 @@ func (l *Loop) dispatchWithRetry(ctx context.Context, c decision.Candidate, begi
 	for attempt := 1; attempt <= max; attempt++ {
 		if begin != nil {
 			if err := begin(); err != nil {
-				return err
+				return DispatchResult{}, err
 			}
 			l.crash(BoundaryAfterIntent)
 		}
 
-		lastErr = l.dispatch(ctx, c)
-		if lastErr == nil {
-			return nil
+		res, err := l.dispatch(ctx, c)
+		if err == nil {
+			return res, nil
 		}
+		lastErr = err
 		if rollback != nil {
 			_ = rollback()
 		}
@@ -342,23 +424,24 @@ func (l *Loop) dispatchWithRetry(ctx context.Context, c decision.Candidate, begi
 		l.recordRetry()
 		l.sleep(l.cfg.Retry.Backoff)
 	}
-	return lastErr
+	return DispatchResult{}, lastErr
 }
 
 // dispatch runs ONE dispatch attempt, bounded by Config.AttemptTimeout when it
 // is set. A timeout surfaces as a context.DeadlineExceeded error, which the
 // retry loop treats as a retryable failure.
-func (l *Loop) dispatch(ctx context.Context, c decision.Candidate) error {
+func (l *Loop) dispatch(ctx context.Context, c decision.Candidate) (DispatchResult, error) {
 	attemptCtx := ctx
 	if l.cfg.AttemptTimeout > 0 {
 		var cancel context.CancelFunc
 		attemptCtx, cancel = context.WithTimeout(ctx, l.cfg.AttemptTimeout)
 		defer cancel()
 	}
-	if _, err := l.dispatcher.Dispatch(attemptCtx, c); err != nil {
-		return fmt.Errorf("loop: dispatch %s: %w", c.ID, err)
+	res, err := l.dispatcher.Dispatch(attemptCtx, c)
+	if err != nil {
+		return DispatchResult{}, fmt.Errorf("loop: dispatch %s: %w", c.ID, err)
 	}
-	return nil
+	return res, nil
 }
 
 // sleep waits for the deterministic backoff delay between retry attempts. A
