@@ -316,3 +316,90 @@ func TestSandboxContainedByDefault(t *testing.T) {
 		t.Fatal("parsed empty sandbox is not contained")
 	}
 }
+
+// TestMigrateConfigRegistryAcrossBump proves the config migration registry is
+// an ordered N -> N+1 -> N+2 walk (the same shape as the checkpoint registry in
+// internal/loop): every step applies in order, the version lands on the target,
+// and the walk is deterministic. It exercises the registry directly with a
+// synthetic chain, independent of the current Version.
+func TestMigrateConfigRegistryAcrossBump(t *testing.T) {
+	var applied []int
+	step := func(n int) func(*Config) { return func(*Config) { applied = append(applied, n) } }
+	regs := []configMigration{
+		{From: 1, To: 2, Apply: step(1)},
+		{From: 2, To: 3, Apply: step(2)},
+	}
+
+	c := &Config{Sizing: SizingConfig{MaxWorkers: 5}}
+	if err := migrateConfig(c, 1, 3, regs); err != nil {
+		t.Fatalf("migrateConfig 1->3: %v", err)
+	}
+	if c.Version != 3 || !reflect.DeepEqual(applied, []int{1, 2}) {
+		t.Fatalf("walk = version %d, applied %v; want version 3, applied [1 2]", c.Version, applied)
+	}
+	if c.Sizing.MaxWorkers != 5 {
+		t.Fatalf("walk rewrote Sizing.MaxWorkers = %d, want 5", c.Sizing.MaxWorkers)
+	}
+
+	// Deterministic: an identical walk over identical input is deeply equal.
+	var applied2 []int
+	step2 := func(n int) func(*Config) { return func(*Config) { applied2 = append(applied2, n) } }
+	regs2 := []configMigration{
+		{From: 1, To: 2, Apply: step2(1)},
+		{From: 2, To: 3, Apply: step2(2)},
+	}
+	c2 := &Config{Sizing: SizingConfig{MaxWorkers: 5}}
+	if err := migrateConfig(c2, 1, 3, regs2); err != nil {
+		t.Fatalf("migrateConfig second walk: %v", err)
+	}
+	if !reflect.DeepEqual(c, c2) || !reflect.DeepEqual(applied, applied2) {
+		t.Fatalf("migration walk nondeterministic:\n%+v/%v\n%+v/%v", c, applied, c2, applied2)
+	}
+}
+
+// TestMigrateConfigRegistryRefusals pins the registry refusals: a version below
+// the floor, above the target, or on a gap with no step is refused
+// deterministically — never partially migrated.
+func TestMigrateConfigRegistryRefusals(t *testing.T) {
+	var applied []int
+	step := func(n int) func(*Config) { return func(*Config) { applied = append(applied, n) } }
+	regs := []configMigration{
+		{From: 1, To: 2, Apply: step(1)},
+		{From: 3, To: 4, Apply: step(3)},
+	}
+	if err := migrateConfig(&Config{}, 0, 4, regs); err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("below-floor err = %v, want a not-supported refusal", err)
+	}
+	if err := migrateConfig(&Config{}, 5, 4, regs); err == nil || !strings.Contains(err.Error(), "newer than") {
+		t.Fatalf("above-target err = %v, want a newer-than refusal", err)
+	}
+	g := &Config{}
+	if err := migrateConfig(g, 1, 4, regs); err == nil || !strings.Contains(err.Error(), "no migration path") {
+		t.Fatalf("gap err = %v, want a no-migration-path refusal", err)
+	}
+	// Two-pass: a gap refuses before any step runs, so nothing was applied and
+	// the document is untouched (never a partial migration).
+	if len(applied) != 0 || g.Version != 0 {
+		t.Fatalf("gap refusal partially migrated: applied %v, version %d", applied, g.Version)
+	}
+}
+
+// TestMigrateV0Deterministic asserts the documented v0 -> v1 migration is a
+// pure function of its bytes: identical input yields deeply-equal, migrated
+// configs across runs.
+func TestMigrateV0Deterministic(t *testing.T) {
+	doc := testdata(t, "v0.yaml")
+	first, err := Parse(doc)
+	if err != nil {
+		t.Fatalf("Parse(v0): %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		got, err := Parse(doc)
+		if err != nil {
+			t.Fatalf("Parse(v0) run %d: %v", i, err)
+		}
+		if !reflect.DeepEqual(first, got) {
+			t.Fatalf("v0 migration run %d differs from the first", i)
+		}
+	}
+}

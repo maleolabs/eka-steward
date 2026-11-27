@@ -99,7 +99,10 @@ produce its result, so the same input always yields the same output.
 ## Versioning
 
 The current schema version is `1` (`config.Version`). The version gate is
-`Migrate`:
+`Migrate`, which walks the ordered **migration registry**
+(`configMigrations = [{0 -> 1}]`); the registry shape, the supported range and
+the refusal semantics (shared with the checkpoint registry in `internal/loop`)
+are in [`upgrade.md`](upgrade.md):
 
 - `version: 1` — validated as-is.
 - **absent `version`** — decodes as `0` and is migrated (documented default);
@@ -120,9 +123,10 @@ only a missing (`0`) value gains the default. Migrations are applied in order
 from the document's version up to the current one, and `Migrate` is
 idempotent for a current-version document.
 
-To add a future `n -> n+1` change: bump `config.Version`, add a
-`migrateV<n>toV<n+1>` step to the `Migrate` loop, document the row above, and
-add a `version: <n>` fixture plus a migration test. The refusal of a version
+To add a future `n -> n+1` change: bump `config.Version`, append a
+`{From: n, To: n+1}` step to the `configMigrations` registry, document the row
+above, and add a `version: <n>` fixture plus a migration test (never edit an
+existing step — see [`upgrade.md`](upgrade.md)). The refusal of a version
 newer than `config.Version` is what keeps a newer document from being read by
 an older steward.
 

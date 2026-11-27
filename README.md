@@ -71,6 +71,7 @@ docs/discuss.md          discussion phase: lifecycle, code vs LLM split, recorde
 docs/backpressure.md     bounded worker pool: sizing-bounded concurrency, deterministic overflow, metrics
 docs/checkpoint.md       crash-safe checkpoint/resume: intent log, reconcile, crash matrix
 docs/recovery.md         bounded retry, cancel semantics, failure -> no partial write
+docs/upgrade.md          schema migration registry (checkpoint + config), version range, refusal, forward-only rollback note
 docs/observability.md    structured step log, metric names, run report, secret redaction
 docs/review.md           review stage: policy, deterministic reviewer, review-note gate
 docs/approval.md         human approval: escalation rule, no-TTY channel, typed artifact, bounded wait, resume
@@ -242,6 +243,14 @@ gate), so no EKA write is applied twice and completed work is not
 re-dispatched. The checkpoint location, the intent protocol, the reconcile
 rules per write class and the crash matrix are in
 [`docs/checkpoint.md`](docs/checkpoint.md).
+
+The persisted **schemas** (the checkpoint and the config document) migrate
+**forward** through an explicit, ordered registry, and a version the running
+steward cannot reach is **refused** deterministically rather than guessed at —
+never silent corruption. Reverting steward does **not** revert EKA: applied
+writes are **forward-only** and a schema downgrade is unsupported and refused.
+The registries, the supported version range, the in-flight-across-upgrade
+behaviour and the rollback note are in [`docs/upgrade.md`](docs/upgrade.md).
 
 ## Discussion
 

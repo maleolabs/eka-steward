@@ -37,9 +37,26 @@ import (
 // any other version is refused.
 const Version = 1
 
-// oldestVersion is the oldest schema version Parse still migrates from.
-// Version 0 is the pre-schema document: roles + drivers only.
-const oldestVersion = 0
+// configMigration is one ordered schema-migration step: it upgrades a document
+// at From to To in place. It is the mirror of the checkpoint migration registry
+// in internal/loop (checkpointMigrations) — the same ordered shape — so both
+// surfaces migrate deterministically and are documented together in
+// docs/upgrade.md.
+type configMigration struct {
+	From  int
+	To    int
+	Apply func(*Config)
+}
+
+// configMigrations is the ORDERED schema-migration registry, oldest first.
+// Parse/Migrate walk it from a document's version up to Version; the walk is
+// deterministic (slice order, no map iteration) and never partial. Bumping the
+// schema means appending {From: Version, To: next}, advancing Version, adding a
+// fixture and a test — never editing or removing an existing step.
+// docs/config.md, docs/upgrade.md.
+var configMigrations = []configMigration{
+	{From: 0, To: 1, Apply: migrateV0toV1},
+}
 
 // Config is the decoded, validated, current-version steward config. Every
 // section is validated: roles and drivers by their own strict parsers, sizing
@@ -180,25 +197,74 @@ func Parse(data []byte) (*Config, error) {
 }
 
 // Migrate upgrades c in place from the schema version `from` to the current
-// Version, applying the documented migrations in order. It is deterministic
-// and, for an already-current document, a no-op. An unknown or future `from`
-// is a deterministic error — an unrecognised version is never silently
-// accepted.
+// Version, applying the ordered migration registry (configMigrations). It is
+// deterministic and, for an already-current document, a no-op. An unknown or
+// future `from` is a deterministic error — an unrecognised version is never
+// silently accepted.
 func (c *Config) Migrate(from int) error {
+	return migrateConfig(c, from, Version, configMigrations)
+}
+
+// migrateConfig walks regs from `from` to `to`, applying each step in order and
+// stamping c.Version = to on success. It is the shared registry shape (mirrored
+// by internal/loop's checkpoint migration). A version below the registry floor,
+// above `to`, or on a gap with no registry step is refused deterministically:
+// the full step path is resolved BEFORE any Apply runs, so a refusal never
+// leaves c partially migrated.
+func migrateConfig(c *Config, from, to int, regs []configMigration) error {
+	floor := configMigrationFloor(regs, to)
 	switch {
-	case from < oldestVersion:
-		return fmt.Errorf("config: version %d is not supported (oldest supported is %d, current is %d)", from, oldestVersion, Version)
-	case from > Version:
-		return fmt.Errorf("config: version %d is newer than this steward supports (current is %d)", from, Version)
+	case from < floor:
+		return fmt.Errorf("config: version %d is not supported (oldest supported is %d, current is %d)", from, floor, to)
+	case from > to:
+		return fmt.Errorf("config: version %d is newer than this steward supports (current is %d)", from, to)
 	}
-	for v := from; v < Version; v++ {
-		switch v {
-		case 0:
-			migrateV0toV1(c)
+	path, err := configMigrationPath(regs, from, to, floor)
+	if err != nil {
+		return err
+	}
+	for _, m := range path {
+		m.Apply(c)
+	}
+	c.Version = to
+	return nil
+}
+
+// configMigrationPath resolves the ordered steps from `from` to `to`, or returns
+// the gap refusal before any step is applied (a clean two-pass).
+func configMigrationPath(regs []configMigration, from, to, floor int) ([]configMigration, error) {
+	var path []configMigration
+	for v := from; v < to; {
+		m, ok := configMigrationFrom(regs, v)
+		if !ok {
+			return nil, fmt.Errorf("config: no migration path from version %d to %d (supported %d..%d)", v, to, floor, to)
+		}
+		path = append(path, m)
+		v = m.To
+	}
+	return path, nil
+}
+
+// configMigrationFloor is the oldest version regs can upgrade from: the smallest
+// From. With no registry step it is `to` itself, so anything older is refused.
+func configMigrationFloor(regs []configMigration, to int) int {
+	floor := to
+	for _, m := range regs {
+		if m.From < floor {
+			floor = m.From
 		}
 	}
-	c.Version = Version
-	return nil
+	return floor
+}
+
+// configMigrationFrom returns the registry step whose From is v.
+func configMigrationFrom(regs []configMigration, v int) (configMigration, bool) {
+	for _, m := range regs {
+		if m.From == v {
+			return m, true
+		}
+	}
+	return configMigration{}, false
 }
 
 // migrateV0toV1 fills the defaults for the sections a version-0 document
