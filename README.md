@@ -51,11 +51,13 @@ internal/escapehatch/    the one audited subprocess adapter (allow-list)
 internal/decision/      pure, deterministic selection/order kernel (stdlib only)
 internal/role/          steward worker-role config (parse + resolve; no EKA)
 internal/sizing/        pure worker-count sizing (no I/O, no LLM)
+internal/render/        pure, bounded context-payload renderer (stdlib only)
 docs/adr/                architecture decision records
 docs/boundary.md         the two hard boundary rules (api-only, one escape hatch)
 docs/determinism.md      code decides which/when/if, the LLM decides what
 docs/roles.md            roles are steward config; no role reads or writes EKA
 docs/sizing.md           the deterministic worker-count formula (no LLM input)
+docs/context.md          the bounded, byte-stable context payload (never writes EKA)
 scripts/bump.sh          version bump + tag automation
 anvil.yaml               anvil project + lifecycle definition
 .anvil/pipelines/        CI and release build pipelines
@@ -128,6 +130,20 @@ reduced by a cost ceiling. The formula, the clamp, the cost-ceiling rule
 and the edge-behaviour table are in
 [`docs/sizing.md`](docs/sizing.md). Reading `cgroup` v2 to fill the
 snapshot is a separate, later control-loop work item.
+
+## Context payload
+
+The payload handed to a worker is rendered by `internal/render` — a pure,
+stdlib-only function (`Render(Input, Options) ([]byte, error)`) that turns a
+caller-ordered selection of knowledge into deterministic markdown. Identical
+input yields byte-identical output: no map iteration, no clock, no
+randomness, no LLM, and it never writes EKA. A hard byte budget caps the
+payload; overflow is deterministic under a documented truncation order
+(`note` → `knowledge` → `constraint` → `acceptance` → `instruction` →
+header, unknown kinds first), cutting at a line boundary and never splitting
+a UTF-8 rune. The shape, the budget, the precedence table and the UTF-8 rule
+are in [`docs/context.md`](docs/context.md); the exact bytes are pinned by
+`internal/render/testdata/context.golden`.
 
 ## Deliberate omissions vs eka-cli
 
