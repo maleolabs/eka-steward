@@ -49,6 +49,10 @@ type config struct {
 //
 // The returned Set is sorted by role name. An empty config (no roles) is
 // a valid empty set; a malformed or empty-byte document is an error.
+//
+// Parse is the standalone document entry point; it decodes the "roles"
+// list and delegates validation to ParseRoles, so a role set embedded in a
+// larger config (internal/config) is validated identically.
 func Parse(data []byte) (*Set, error) {
 	var cfg config
 	dec := yaml.NewDecoder(bytes.NewReader(data))
@@ -56,13 +60,22 @@ func Parse(data []byte) (*Set, error) {
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("role: parse config: %w", err)
 	}
+	return ParseRoles(cfg.Roles)
+}
 
-	roles := make([]Role, len(cfg.Roles))
-	copy(roles, cfg.Roles)
-	sort.Slice(roles, func(i, j int) bool { return roles[i].Name < roles[j].Name })
+// ParseRoles validates an already-decoded roles list and returns the
+// sorted, immutable Set. It applies exactly the rules Parse does — non-empty
+// name/driver/template, unique names — so a caller that decoded the list
+// itself (e.g. internal/config, whose document nests the roles under other
+// sections) reuses the standalone behaviour instead of restating it. The
+// input slice is not retained or mutated.
+func ParseRoles(roles []Role) (*Set, error) {
+	out := make([]Role, len(roles))
+	copy(out, roles)
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 
-	index := make(map[string]Role, len(roles))
-	for _, r := range roles {
+	index := make(map[string]Role, len(out))
+	for _, r := range out {
 		switch {
 		case r.Name == "":
 			return nil, errors.New("role: role with empty name")
@@ -76,7 +89,7 @@ func Parse(data []byte) (*Set, error) {
 		}
 		index[r.Name] = r
 	}
-	return &Set{roles: roles, index: index}, nil
+	return &Set{roles: out, index: index}, nil
 }
 
 // Resolve returns the role named name. An unknown name is an error that
@@ -87,6 +100,14 @@ func (s *Set) Resolve(name string) (Role, error) {
 		return Role{}, fmt.Errorf("role: unknown role %q", name)
 	}
 	return r, nil
+}
+
+// Roles returns a copy of the validated roles in deterministic (sorted)
+// order.
+func (s *Set) Roles() []Role {
+	out := make([]Role, len(s.roles))
+	copy(out, s.roles)
+	return out
 }
 
 // Names returns every role name in deterministic (sorted) order.

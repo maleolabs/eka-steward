@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/maleolabs/eka-steward/v2/internal/decision"
+	"github.com/maleolabs/eka-steward/v2/internal/plan"
 )
 
 // fixtureCandidates is the deterministic fixture candidate set. It deliberately
@@ -277,4 +278,94 @@ func reverse(cs []decision.Candidate) []decision.Candidate {
 		out[len(cs)-1-i] = c
 	}
 	return out
+}
+
+// graphSource is a fixed GraphSource: it implements Source.Candidates (so it
+// can be wired into the loop) and the optional Graph capability, so the loop
+// plans over its dependency graph.
+type graphSource struct {
+	nodes []plan.Node
+	edges []plan.Edge
+}
+
+func (g graphSource) Candidates(context.Context) ([]decision.Candidate, error) {
+	out := make([]decision.Candidate, 0, len(g.nodes))
+	for _, n := range g.nodes {
+		out = append(out, decision.Candidate{ID: n.ID, State: n.State, Priority: n.Priority, CreatedSeq: n.CreatedSeq})
+	}
+	return out, nil
+}
+
+func (g graphSource) Graph(context.Context) ([]plan.Node, []plan.Edge, error) {
+	return g.nodes, g.edges, nil
+}
+
+// TestGraphPlanOrdersTopologicallyAndSkipsBlocked proves the loop plans over
+// the Source's graph: a dependency edge orders the prerequisite first, and a
+// unit whose prerequisite is not terminal is blocked and never planned or
+// selected. The plan stays pure (the dispatcher is never consulted).
+func TestGraphPlanOrdersTopologicallyAndSkipsBlocked(t *testing.T) {
+	src := graphSource{
+		nodes: []plan.Node{
+			{ID: "A", State: decision.StatePlanned, CreatedSeq: 1},
+			{ID: "B", State: decision.StateTodo, CreatedSeq: 2},    // depends-on A (not terminal)
+			{ID: "C", State: decision.StatePlanned, CreatedSeq: 3}, // independent
+			{ID: "D", State: decision.StateTodo, CreatedSeq: 4},    // depends-on C (not terminal)
+		},
+		edges: []plan.Edge{{From: "A", To: "B"}, {From: "C", To: "D"}},
+	}
+	spy := &spyDispatcher{mustNotRun: true}
+	l, _ := newTestLoop(t, src, spy, nil)
+
+	steps, err := l.Plan(context.Background())
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	// B and D are blocked (their prerequisites A, C are still planned), so
+	// only A and C are planned, in the deterministic order (A before C).
+	if got := stepIDs(steps); got != "A,C" {
+		t.Fatalf("plan ids = %q, want %q (blocked B,D must never be planned)", got, "A,C")
+	}
+	if spy.calls != 0 {
+		t.Fatalf("Plan called the dispatcher %d times, want 0", spy.calls)
+	}
+
+	// Step also refuses the blocked nodes: it dispatches A first.
+	spy.mustNotRun = false
+	step, ok, err := l.Step(context.Background())
+	if err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	if !ok || step.CandidateID != "A" {
+		t.Fatalf("Step = (%q,%v), want (A,true)", step.CandidateID, ok)
+	}
+}
+
+// TestGraphPlanUnblocksWhenPrerequisiteTerminal proves a unit is planned once
+// its prerequisite reaches a terminal state.
+func TestGraphPlanUnblocksWhenPrerequisiteTerminal(t *testing.T) {
+	src := graphSource{
+		nodes: []plan.Node{
+			{ID: "A", State: decision.StateDone, CreatedSeq: 1}, // terminal
+			{ID: "B", State: decision.StateTodo, CreatedSeq: 2}, // depends-on A (terminal)
+		},
+		edges: []plan.Edge{{From: "A", To: "B"}},
+	}
+	l, _ := newTestLoop(t, src, &spyDispatcher{}, nil)
+	steps, err := l.Plan(context.Background())
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if got := stepIDs(steps); got != "B" {
+		t.Fatalf("plan ids = %q, want %q", got, "B")
+	}
+}
+
+// stepIDs joins the candidate IDs of a step sequence.
+func stepIDs(steps []Step) string {
+	ids := make([]string, len(steps))
+	for i, s := range steps {
+		ids[i] = s.CandidateID
+	}
+	return strings.Join(ids, ",")
 }

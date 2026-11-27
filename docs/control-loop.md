@@ -37,7 +37,7 @@ testable:
 
 | Seam | Role | Production | Tests |
 | --- | --- | --- | --- |
-| `Source` | reads EKA **read-only**, yields `[]decision.Candidate` | `StoreSource` (api.Knowledge, one project) | fixed `fixtureSource` |
+| `Source` | reads EKA **read-only**, yields `[]decision.Candidate`; the optional `GraphSource` capability yields the dependency graph | `StoreSource` (api.Knowledge, one project) | fixed `fixtureSource` / `graphSource` |
 | `Dispatcher` | the worker/LLM seam — the only place a worker runs | (deferred ACP worker dispatch) | `spyDispatcher` that records calls |
 | `Writer` | the single EKA write path | `EkawriteWriter` → `internal/ekawrite` | a fake / nil |
 
@@ -57,14 +57,17 @@ testable:
 
 - `Plan(ctx) ([]Step, error)` is a **pure selection**. It reads the Source
   and the persisted state, orders the candidates with
-  `internal/decision.Order`, drops non-dispatchable states (`planned`,
-  `todo` only) and returns one `Step` per remaining candidate, in order. It
-  **never calls the `Dispatcher`**; the LLM-call spy test fails if it does.
-  The same source set + state yields byte-identical `Step` JSON across runs
-  and any input permutation (the order comes from `decision`, not from the
-  slice or map iteration).
+  `internal/plan.Selectable` (topological over `depends-on`, then the
+  container/`decision` tie-break — `docs/selection.md`), drops non-dispatchable
+  states (`planned`, `todo` only) and blocked candidates, and returns one
+  `Step` per remaining candidate, in order. It **never calls the `Dispatcher`**;
+  the LLM-call spy test fails if it does. The same source set + state yields
+  byte-identical `Step` JSON across runs and any input permutation (the order
+  comes from the planner, not from the slice or map iteration). With no
+  dependency edges the order is identical to `internal/decision.Order`.
 - `Step(ctx) (Step, bool, error)` plans the next candidate
-  (`decision.SelectNext`) and runs it as a **checkpointed transaction**: write
+  (`plan.SelectNext`, the head of `Selectable`) and runs it as a
+  **checkpointed transaction**: write
   the intent ahead of dispatch, dispatch, apply the write through `Writer`
   (when `Config.DispatchState` is set), then move the intent to done. It
   returns `ok=false` when nothing is dispatchable.

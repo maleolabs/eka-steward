@@ -24,6 +24,11 @@ const (
 	IntentTransition IntentKind = "transition"
 	// IntentPublish is the creation of a knowledge unit.
 	IntentPublish IntentKind = "publish"
+	// IntentApproval is an escalated permission request awaiting (or already
+	// carrying) a human decision. Its reconcile re-reads the durable decision
+	// and re-records the typed artifact through ekawrite's replay gate, so a
+	// restart never records the same approval twice (docs/approval.md).
+	IntentApproval IntentKind = "approval"
 )
 
 // Intent is one write-ahead record: the mutation a step intends to apply,
@@ -47,10 +52,25 @@ type Intent struct {
 	// Publish carries the payload needed to re-issue a publish (IntentPublish
 	// only).
 	Publish *PublishIntent `json:"publish,omitempty"`
+	// Approval carries the escalated permission request (IntentApproval only).
+	// It is self-contained so resume can re-read the durable decision without
+	// re-deriving it.
+	Approval *ApprovalIntent `json:"approval,omitempty"`
 	// Step is the exact deterministic step this intent belongs to; resume
 	// replays it verbatim so the step sequence is byte-identical after a
 	// restart.
 	Step Step `json:"step"`
+}
+
+// ApprovalIntent is the re-issuable payload of an escalated permission
+// request. Key is the deterministic request key (approval.RequestFor), so a
+// re-issued request is the SAME approval.
+type ApprovalIntent struct {
+	Key           string `json:"key"`
+	ToolKind      string `json:"toolKind"`
+	Path          string `json:"path,omitempty"`
+	WorkspaceRoot string `json:"workspaceRoot,omitempty"`
+	OptionID      string `json:"optionId"`
 }
 
 // PublishIntent is the re-issuable payload of a unit-creation intent. It

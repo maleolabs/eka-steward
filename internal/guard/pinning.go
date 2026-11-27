@@ -18,8 +18,11 @@ import (
 var ErrUnpinned = errors.New("guard: driver not pinned")
 
 // RequirePinned refuses every driver without an exact Version and a sha256
-// Checksum, then verifies each pinned binary's checksum. The error is
-// deterministic and names the tool and what is missing or wrong.
+// Checksum, then verifies each pinned binary's checksum. It is the
+// binary-verifying half of the trust gate: driver.RequireKnown (pure)
+// classifies a driver KNOWN/UNKNOWN from its pin fields, and this function
+// additionally resolves and hashes the binary. The error is deterministic
+// and names the tool and what is missing or wrong.
 //
 // Resolution uses os + the PATH only (no os/exec): a cmd containing a path
 // separator is used as-is; a bare name is looked up on PATH. A binary that
@@ -31,23 +34,37 @@ func RequirePinned(reg *driver.Registry) error {
 		if err != nil {
 			return err // Names comes from reg, so this cannot happen
 		}
-		if spec.Version == "" {
-			return fmt.Errorf("%w: tool %q has no version", ErrUnpinned, tool)
+		if err := VerifyBinary(spec); err != nil {
+			return err
 		}
-		if spec.Checksum == "" {
-			return fmt.Errorf("%w: tool %q has no checksum", ErrUnpinned, tool)
-		}
-		path, ok := resolveBinary(spec.Cmd)
-		if !ok {
-			return fmt.Errorf("%w: tool %q binary %q not found", ErrUnpinned, tool, spec.Cmd)
-		}
-		got, err := fileSHA256(path)
-		if err != nil {
-			return fmt.Errorf("%w: tool %q: %v", ErrUnpinned, tool, err)
-		}
-		if !strings.EqualFold(got, spec.Checksum) {
-			return fmt.Errorf("%w: tool %q checksum mismatch: got %s want %s", ErrUnpinned, tool, got, spec.Checksum)
-		}
+	}
+	return nil
+}
+
+// VerifyBinary verifies ONE driver Spec's pin against its resolved binary:
+// it refuses a Spec without an exact Version or Checksum, then resolves the
+// binary (os + PATH, no os/exec) and matches its lowercase-hex sha256
+// against the pin (case-insensitive). It is the per-Spec form of
+// RequirePinned, exported so a caller that has a single Spec (not a whole
+// registry) reuses the exact same rule. Errors wrap ErrUnpinned and name the
+// tool.
+func VerifyBinary(spec driver.Spec) error {
+	if spec.Version == "" {
+		return fmt.Errorf("%w: tool %q has no version", ErrUnpinned, spec.Tool)
+	}
+	if spec.Checksum == "" {
+		return fmt.Errorf("%w: tool %q has no checksum", ErrUnpinned, spec.Tool)
+	}
+	path, ok := resolveBinary(spec.Cmd)
+	if !ok {
+		return fmt.Errorf("%w: tool %q binary %q not found", ErrUnpinned, spec.Tool, spec.Cmd)
+	}
+	got, err := fileSHA256(path)
+	if err != nil {
+		return fmt.Errorf("%w: tool %q: %v", ErrUnpinned, spec.Tool, err)
+	}
+	if !strings.EqualFold(got, spec.Checksum) {
+		return fmt.Errorf("%w: tool %q checksum mismatch: got %s want %s", ErrUnpinned, spec.Tool, got, spec.Checksum)
 	}
 	return nil
 }

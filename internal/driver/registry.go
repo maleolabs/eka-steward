@@ -68,13 +68,18 @@ var ErrUnknownTool = errors.New("driver: unknown tool")
 // without them, but guard.RequirePinned refuses any driver that lacks
 // either, and verifies the resolved binary's sha256 against Checksum
 // (lowercase hex). Pinning is a containment gate, not a parse rule.
+//
+// The yaml tags are used when a driver list is decoded as part of a larger
+// config document (internal/config). Kind is tagged "-" on purpose: the
+// wire kind is DERIVED from the tool's adapter (ParseDrivers sets it), so a
+// `kind` key in config is an unknown field and is refused.
 type Spec struct {
-	Tool     string
-	Cmd      string
-	Args     []string
-	Kind     Kind
-	Version  string
-	Checksum string
+	Tool     string   `yaml:"tool"`
+	Cmd      string   `yaml:"cmd"`
+	Args     []string `yaml:"args"`
+	Kind     Kind     `yaml:"-"`
+	Version  string   `yaml:"version"`
+	Checksum string   `yaml:"checksum"`
 }
 
 // Capabilities is the recorded result of probing a driver. It is stored on
@@ -101,18 +106,11 @@ type Registry struct {
 }
 
 // config is the on-disk document shape: a single "drivers" list. The
-// per-driver shape is deliberately {tool, cmd, args} only — the wire kind
-// is derived, so it is not a decodable field.
+// per-driver shape is deliberately {tool, cmd, args} (+ optional pins); the
+// wire kind is derived (Spec.Kind is yaml:"-"), so it is not a decodable
+// field.
 type config struct {
-	Drivers []driverConfig `yaml:"drivers"`
-}
-
-type driverConfig struct {
-	Tool     string   `yaml:"tool"`
-	Cmd      string   `yaml:"cmd"`
-	Args     []string `yaml:"args"`
-	Version  string   `yaml:"version"`
-	Checksum string   `yaml:"checksum"`
+	Drivers []Spec `yaml:"drivers"`
 }
 
 // Parse decodes and validates a driver config. Parsing is strict:
@@ -125,6 +123,10 @@ type driverConfig struct {
 // The returned Registry is sorted by tool, so Names and selection are
 // deterministic. An empty driver list is a valid empty registry; malformed
 // or empty-byte input is an error.
+//
+// Parse is the standalone document entry point; it decodes the "drivers"
+// list and delegates validation to ParseDrivers, so a driver set embedded
+// in a larger config (internal/config) is validated identically.
 func Parse(data []byte) (*Registry, error) {
 	var cfg config
 	dec := yaml.NewDecoder(bytes.NewReader(data))
@@ -132,16 +134,23 @@ func Parse(data []byte) (*Registry, error) {
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("driver: parse config: %w", err)
 	}
+	return ParseDrivers(cfg.Drivers)
+}
 
-	specs := make([]Spec, len(cfg.Drivers))
-	for i, d := range cfg.Drivers {
-		specs[i] = Spec{Tool: d.Tool, Cmd: d.Cmd, Args: d.Args, Version: d.Version, Checksum: d.Checksum}
-	}
-	sort.Slice(specs, func(i, j int) bool { return specs[i].Tool < specs[j].Tool })
+// ParseDrivers validates an already-decoded driver list and returns the
+// sorted, immutable Registry. It applies exactly the rules Parse does —
+// non-empty tool/cmd, unique tools, a registered adapter per tool — and
+// derives each Spec.Kind from its adapter, so a caller that decoded the list
+// itself (e.g. internal/config) reuses the standalone behaviour instead of
+// restating it. The input slice is not retained or mutated.
+func ParseDrivers(specs []Spec) (*Registry, error) {
+	out := make([]Spec, len(specs))
+	copy(out, specs)
+	sort.Slice(out, func(i, j int) bool { return out[i].Tool < out[j].Tool })
 
-	index := make(map[string]Spec, len(specs))
-	for i := range specs {
-		s := &specs[i]
+	index := make(map[string]Spec, len(out))
+	for i := range out {
+		s := &out[i]
 		switch {
 		case s.Tool == "":
 			return nil, errors.New("driver: driver with empty tool")
@@ -158,7 +167,15 @@ func Parse(data []byte) (*Registry, error) {
 		}
 		index[s.Tool] = *s
 	}
-	return &Registry{specs: specs, index: index}, nil
+	return &Registry{specs: out, index: index}, nil
+}
+
+// Specs returns a copy of the resolved specs in deterministic (sorted) order,
+// each carrying its adapter-derived Kind.
+func (r *Registry) Specs() []Spec {
+	out := make([]Spec, len(r.specs))
+	copy(out, r.specs)
+	return out
 }
 
 // Names returns every registered tool name in deterministic (sorted) order.

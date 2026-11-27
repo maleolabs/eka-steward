@@ -34,7 +34,28 @@ const (
 	Deny Outcome = iota
 	// Allow permits the request.
 	Allow
+	// Escalate means the policy CANNOT decide: the request is well-formed
+	// (allow_once) but falls outside what the allow-list covers, so it must
+	// be sent to a human instead of being silently denied. Escalate is never
+	// an Allow by itself; a human decision (or the bounded-wait timeout) still
+	// gates it. A policy that opts out (Policy.DenyUndecidable) never returns
+	// it.
+	Escalate
 )
+
+// String renders an Outcome for tests and diagnostics.
+func (o Outcome) String() string {
+	switch o {
+	case Deny:
+		return "deny"
+	case Allow:
+		return "allow"
+	case Escalate:
+		return "escalate"
+	default:
+		return fmt.Sprintf("outcome(%d)", int(o))
+	}
+}
 
 // Tool classes. Only ToolRead is ever allowable by the built-in policy.
 const (
@@ -63,37 +84,55 @@ type PermissionRequest struct {
 }
 
 // Policy is the steward's permission policy. Its zero value is
-// DEFAULT-DENY: it allows no read and applies the default wait bound.
+// DEFAULT-DENY: it allows no read and applies the default wait bound. It is
+// also DEFAULT-ESCALATE for the class it cannot decide: an otherwise
+// well-formed request the allow-list does not cover is returned as Escalate
+// (to a human), not silently denied.
 type Policy struct {
 	// AllowReadWithinRoot permits read-class requests inside
 	// WorkspaceRoot. The zero value (false) allows nothing.
 	AllowReadWithinRoot bool
-	// Timeout bounds AwaitAnswer. <= 0 applies DefaultPermissionTimeout.
+	// Timeout bounds AwaitAnswer (and an approval gate built on it).
+	// <= 0 applies DefaultPermissionTimeout.
 	Timeout time.Duration
+	// DenyUndecidable opts OUT of escalation: an undecidable request is then
+	// refused instead of sent to a human. The zero value (false) ESCALATES,
+	// so a request the policy cannot decide is never silently denied. This
+	// never turns a Deny into an Allow: the clearly-deniable classes stay
+	// Deny either way.
+	DenyUndecidable bool
 }
 
 // Decide is the pure, deterministic decision for req. The same input always
 // yields the same answer: no clock, randomness, I/O or state.
 //
-// From the zero Policy, every request is Deny. A request is Allow ONLY when
-// its OptionID is allow_once, its class is read, the policy allows reads,
-// and Path is inside WorkspaceRoot. Everything else — execute/edit/delete/
-// move, any other class, an unknown OptionID, allow_always, or a path that
-// escapes the root — is Deny.
+// Any ACP option id other than allow_once (reject_once/reject_always,
+// allow_always, an unknown id) is DENY — the responder did not grant this
+// request, so no human is consulted.
+//
+// With a grant-eligible option id (allow_once), a read inside WorkspaceRoot
+// is decided by the policy alone: Allow when AllowReadWithinRoot is set,
+// otherwise Deny (the policy forbids reads there).
+//
+// Everything else the policy CANNOT decide — a read OUTSIDE WorkspaceRoot, or
+// a class the allow-list does not cover (execute/edit/delete/move, any other
+// class) — is Escalate by default, and Deny only when DenyUndecidable is set.
+// Escalate is not approval: it hands the request to the human approval gate,
+// whose bounded wait still denies on timeout.
 func (p Policy) Decide(req PermissionRequest) Outcome {
 	if resolveOption(req.OptionID) != Allow {
 		return Deny
 	}
-	if req.ToolKind != ToolRead {
+	if req.ToolKind == ToolRead && withinRoot(req.Path, req.WorkspaceRoot) {
+		if p.AllowReadWithinRoot {
+			return Allow
+		}
 		return Deny
 	}
-	if !p.AllowReadWithinRoot {
+	if p.DenyUndecidable {
 		return Deny
 	}
-	if !withinRoot(req.Path, req.WorkspaceRoot) {
-		return Deny
-	}
-	return Allow
+	return Escalate
 }
 
 // AwaitAnswer waits for an external answer and maps it to an Outcome. The

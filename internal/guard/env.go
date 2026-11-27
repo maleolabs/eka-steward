@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/maleolabs/eka-steward/v2/internal/ekawrite"
+	"github.com/maleolabs/eka-steward/v2/internal/secrets"
 )
 
 // forbiddenEnvNames are variable names a worker environment must never
@@ -58,4 +59,18 @@ func checkEnvVar(kv string) error {
 		}
 	}
 	return nil
+}
+
+// WorkerEnvFor returns the worker environment for tool: the credential-free
+// allow-listed base (WorkerEnv, never carrying a credential) plus ONLY the
+// credentials the tool's driver DECLARES, resolved by the broker. It is the one
+// sanctioned way a credential reaches a worker — the base carries none, and the
+// broker returns exactly the declared names, never os.Environ(). Tool that has
+// no declaration, or is missing a declared credential, fails closed.
+func WorkerEnvFor(b *secrets.Broker, tool string) ([]string, error) {
+	base, err := WorkerEnv()
+	if err != nil {
+		return nil, err
+	}
+	return b.WorkerEnv(base, tool)
 }

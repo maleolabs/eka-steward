@@ -84,6 +84,23 @@ func dispatchable(state string) bool {
 	return state == StatePlanned || state == StateTodo
 }
 
+// StateRank returns the pinned rank of state (StateRankUnknown when the
+// state is not in the rank table). It is exported so an adjacent pure
+// package (internal/plan) shares this ONE rank table instead of duplicating
+// it: the lifecycle order is the pinned contract (docs/determinism.md).
+func StateRank(state string) int { return stateRank(state) }
+
+// Dispatchable reports whether a unit in this State may be dispatched now —
+// the ready states planned and todo. Exported for the same reason as
+// StateRank: internal/plan reuses the one dispatchability rule.
+func Dispatchable(state string) bool { return dispatchable(state) }
+
+// Compare orders two candidates by the pinned total-order key (priority
+// desc, state rank asc, created-seq asc, id asc); <0 when a sorts before b.
+// Exported so internal/plan can reuse it as the tie-break beneath its
+// container-order key, keeping one coherent order contract.
+func Compare(a, b Candidate) int { return compare(a, b) }
+
 // compare orders two candidates by the pinned key: Priority desc, State
 // rank asc, CreatedSeq asc, ID asc. It returns <0 if a sorts before b, >0
 // if a sorts after b, and 0 only when the two are identical in every key

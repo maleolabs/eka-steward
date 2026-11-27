@@ -14,13 +14,16 @@ Module path: `github.com/maleolabs/eka-steward/v2` · Steward `2.0.0` · `eka-co
 
 ## Scope of this release
 
-`2.0.0` is a **scaffold**. It ships the product identity, the module
-contract, the CI/release pipeline and the version surface. The pieces that
-make it an orchestrator — the ACP **control loop** and the **ACP client** —
-are separate work items and are deliberately **absent** here. No
-abstraction is pre-built for them. The deterministic **driver registry**
-(`internal/driver`, see [`docs/drivers.md`](docs/drivers.md)) lands on the
-same foundation.
+`2.0.0` ships the deterministic orchestrator **core**: the ACP **control
+loop** (`internal/loop` — pure `Plan` vs `Step`, single-instance lock,
+cgroup sizing, checkpoint/resume), the **worker pool** with backpressure
+(`internal/pool`), deterministic work selection (`internal/plan`), the
+per-driver **trust + capabilities** model (`internal/driver`), **role
+guardrails** (`internal/guard`), **human approval** (`internal/approval`),
+the **secrets broker** (`internal/secrets`), **review roles**, the
+**discussion phase**, and **observability** (`internal/obs`). All EKA
+writes go through one path (`internal/ekawrite`). See
+[`RELEASE_NOTES.md`](RELEASE_NOTES.md) and [`docs/release.md`](docs/release.md).
 
 ## Invocation: standalone binary, no `eka steward` shim
 
@@ -50,6 +53,7 @@ cmd/                     Cobra command tree (the only production package)
   version.go             version var (ldflags) + `version` command
   *_test.go              boundary, layout-pin and version tests
 internal/escapehatch/    the one audited subprocess adapter (allow-list)
+internal/secrets/        credential broker: declared-only worker creds, egress policy, scoped git auth
 internal/decision/      pure, deterministic selection/order kernel (stdlib only)
 internal/discuss/       discussion phase: bounded, resumable turns recorded as EKA decisions
 internal/loop/          deterministic control loop (Plan/Step/Run, lock, cgroup sizing, resume state)
@@ -58,23 +62,33 @@ internal/obs/           observability: structured step log, metrics, run report,
 internal/guard/         worker containment: env allow-list, per-worker worktree, permission policy, driver pinning
 internal/driver/        deterministic driver registry (parse/resolve/select + probe seam)
 internal/role/          steward worker-role config (parse + resolve; no EKA)
+internal/config/        versioned, strict combined config schema (composes role/driver/sizing; no EKA)
 internal/sizing/        pure worker-count sizing (no I/O, no LLM)
 internal/render/        pure, bounded context-payload renderer (stdlib only)
+internal/plan/          pure dependency-graph planner: topological + container + state order (no I/O, no LLM)
 docs/adr/                architecture decision records
 docs/boundary.md         the two hard boundary rules (api-only, one escape hatch)
 docs/control-loop.md     control loop: seams, pure Plan vs Step, lock, cgroup, state
+docs/selection.md        work-selection spec: topological over depends-on, container order, blocked rule, no LLM
 docs/discuss.md          discussion phase: lifecycle, code vs LLM split, recorded dec-, resume, next-phase input
 docs/backpressure.md     bounded worker pool: sizing-bounded concurrency, deterministic overflow, metrics
 docs/checkpoint.md       crash-safe checkpoint/resume: intent log, reconcile, crash matrix
 docs/recovery.md         bounded retry, cancel semantics, failure -> no partial write
+docs/upgrade.md          schema migration registry (checkpoint + config), version range, refusal, forward-only rollback note
 docs/observability.md    structured step log, metric names, run report, secret redaction
 docs/review.md           review stage: policy, deterministic reviewer, review-note gate
+docs/approval.md         human approval: escalation rule, no-TTY channel, typed artifact, bounded wait, resume
 docs/determinism.md      code decides which/when/if, the LLM decides what
 docs/drivers.md          driver registry: config, adapters, probing (never writes EKA)
 docs/guardrails.md       worker containment: four layers, VCS-isolation-not-a-boundary, residual risks
+docs/secrets.md          per-driver credential declarations, the broker, egress allow-list + enforcement gap, scoped git auth
 docs/roles.md            roles are steward config; no role reads or writes EKA
+docs/config.md           the one versioned, strict config schema (roles/drivers/sizing/sandbox/loop) + migration policy
 docs/sizing.md           the deterministic worker-count formula (no LLM input)
 docs/context.md          the bounded, byte-stable context payload (never writes EKA)
+docs/release.md          release train, version source, pinned eka-core/api, ACP posture, install path, independence from the EKA line
+docs/release-checklist.md  the release owner's steps: tag → workflow → confirm assets → verify install
+RELEASE_NOTES.md         paste-ready release notes (pinned core, ACP posture, WI highlights)
 scripts/bump.sh          version bump + tag automation
 anvil.yaml               anvil project + lifecycle definition
 .anvil/pipelines/        CI and release build pipelines
@@ -129,6 +143,19 @@ output; an LLM-call spy must never fire). The pure ordering/selection
 kernel that pins the order is `internal/decision` — stdlib only, no I/O,
 clock, randomness or LLM.
 
+## Configuration
+
+The steward's configuration is **one versioned, strict document** combining
+every section — `roles`, `drivers`, `sizing`, `sandbox` and `loop` — under a
+single `version` field. `internal/config` parses it strictly (unknown fields
+refused anywhere), reuses the per-section parsers (`internal/role`,
+`internal/driver`, `internal/sizing`) so config and standalone behaviour
+agree, gates and migrates the version, and validates across sections (at
+least one role, every role's driver declared, `sizing.maxWorkers >= 1`,
+sandbox contained by default). The full schema, the strictness rules, the
+validation rules and the version/migration policy live in
+[`docs/config.md`](docs/config.md).
+
 ## Roles
 
 Worker roles are **steward config** — a role resolves deterministically
@@ -152,6 +179,22 @@ zero-value policy disables review entirely, so the loop is byte-identical to the
 pre-review loop. The policy, the selection rule, the note convention, the gate
 and the crash-safety boundary are in [`docs/review.md`](docs/review.md).
 
+### Human approval
+
+When `loop.Config.Approval` is enabled, a permission request the pure guard
+policy **cannot decide** (`execute`/`edit`/`delete`/`move`, or a read outside the
+workspace root) is escalated to a human **before** dispatch instead of being
+silently denied. Clearly-deniable requests (a non-`allow_once` option, a
+forbidden in-root read) stay `Deny`; `Policy.DenyUndecidable` opts out of
+escalation entirely. The default channel is a **no-TTY** file/queue
+(`internal/approval`): a structured request file is published and a structured
+response file is polled with a **bounded wait** whose timeout is always a deny.
+The decision is recorded as a **resolved review-note** artifact through
+`internal/ekawrite` (the schema fixes the `role` vocabulary, so `role: review`
+carries it), with a deterministic replay gate so a resume records it **exactly
+once**. The escalation rule, the channel, the typed-artifact convention and the
+resumption guarantee are in [`docs/approval.md`](docs/approval.md).
+
 ## Drivers
 
 A *driver* is how the steward launches and talks to one coding-agent CLI —
@@ -164,9 +207,13 @@ is a named error (`driver.ErrUnknownTool`). Capability probing is **recorded**
 on the resolved driver (`Capabilities{Kind, Version, ACPVersion, Raw}`)
 through a `Runner` seam — a fake in unit tests, an
 `internal/escapehatch`-backed `ExecRunner` in production (the only file in
-the package that spawns). The shape, adapter table, probe seam and the
-deferred streaming ACP client live in [`docs/drivers.md`](docs/drivers.md);
-the parser/seam is `internal/driver`.
+the package that spawns). A driver is **KNOWN only when pinned** (exact
+version + sha256 checksum); `driver.ParseTrusted` / `config.ParseTrusted` are
+the fail-closed acceptance points, and `claude`/`codex` vendor CLI adapters
+carry an in-repo pin/audit table plus a deterministic `capabilities.json`
+artifact. The shape, adapter table, probe seam, trust rule, vendor pin table
+and the deferred streaming ACP client live in
+[`docs/drivers.md`](docs/drivers.md); the parser/seam is `internal/driver`.
 
 ## Worker sizing
 
@@ -202,6 +249,14 @@ gate), so no EKA write is applied twice and completed work is not
 re-dispatched. The checkpoint location, the intent protocol, the reconcile
 rules per write class and the crash matrix are in
 [`docs/checkpoint.md`](docs/checkpoint.md).
+
+The persisted **schemas** (the checkpoint and the config document) migrate
+**forward** through an explicit, ordered registry, and a version the running
+steward cannot reach is **refused** deterministically rather than guessed at —
+never silent corruption. Reverting steward does **not** revert EKA: applied
+writes are **forward-only** and a schema downgrade is unsupported and refused.
+The registries, the supported version range, the in-flight-across-upgrade
+behaviour and the rollback note are in [`docs/upgrade.md`](docs/upgrade.md).
 
 ## Discussion
 
@@ -296,6 +351,18 @@ a UTF-8 rune. The shape, the budget, the precedence table and the UTF-8 rule
 are in [`docs/context.md`](docs/context.md); the exact bytes are pinned by
 `internal/render/testdata/context.golden`.
 
+## Secrets & egress
+
+A worker receives **only** the credentials its driver **declares**
+(`internal/secrets` + `internal/driver/credentials.go`): the credential-free
+`guard.WorkerEnv` base plus exactly the declared names from an injected
+resolver — never `os.Environ()`, so `GH_TOKEN`, `SSH_AUTH_SOCK`, `AWS_*` and
+`HOME` do not leak. The steward's own git remote ops use a **scoped**,
+broker-provided token, not the host credential. Worker egress is a
+**declarative** allow-list of model endpoints — validated and tested, but
+**not** enforced by the steward (a sandbox/netns/firewall must enforce it). See
+[`docs/secrets.md`](docs/secrets.md).
+
 ## Containment (guardrails)
 
 Every worker runs **contained by default**, with **no opt-out in v1**
@@ -320,6 +387,21 @@ The four layers, the permission decision table, the pinning rule, and the
 honest residual risks (absolute-path execution bypasses `PATH`; the worktree
 is not confinement; a checksum TOCTOU window) are in
 [`docs/guardrails.md`](docs/guardrails.md).
+
+## Release
+
+`eka-steward` ships on its **own `v*` tag train** in its own repository, with
+its own [`.github/workflows/release.yml`](.github/workflows/release.yml) —
+independent of the `eka-cli` / `eka-mcp` / `eka-core` release train. The
+version is `anvil.yaml` → `project.version`, guarded by the workflow against
+the tag; the binary is stamped with `cmd.version` via `ldflags`. Current
+release: [`RELEASE_NOTES.md`](RELEASE_NOTES.md) (`v2.0.0`).
+
+The pinned dependency, the ACP transport posture, the platform/asset naming
+contract, and the install paths (`install.sh` / `install.ps1` /
+`go install …@v2.0.0`) are documented in [`docs/release.md`](docs/release.md).
+The release owner's step-by-step is
+[`docs/release-checklist.md`](docs/release-checklist.md).
 
 ## Deliberate omissions vs eka-cli
 

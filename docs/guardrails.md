@@ -40,6 +40,11 @@ With this environment the worker has:
 Negative tests: `internal/guard/guard_test.go`
 (`TestWorkerEnvIsAllowListed`, `TestWorkerEnvRefusesUnsafeExtensions`).
 
+A worker that legitimately needs a model credential gets **only the names its
+driver declares**, through `guard.WorkerEnvFor(broker, tool)` — the
+credential-free base plus the broker's declared keys, never `os.Environ()`. See
+[`docs/secrets.md`](secrets.md).
+
 ### 2. Worktree — VCS isolation, **not** a security boundary
 
 `guard.NewWorktree(repo, base)` issues one git worktree per worker
@@ -130,6 +135,10 @@ them is a kernel sandbox. Stated plainly:
   binary at validation time; a binary swapped between validation and spawn
   is not caught. Validate immediately before exec — or stage a
   content-addressed copy — to close the window.
+- **Egress is not enforced here.** Network egress is described by a declarative
+  allow-list (`internal/secrets.EgressPolicy`); no layer of this package blocks
+  a worker's network. A sandbox/network namespace (or a host firewall) must
+  enforce it — see [`docs/secrets.md`](secrets.md) §4.
 - **Allow-list checks the base name only** (see
   [`docs/boundary.md`](boundary.md)); it narrows *which* executables the
   steward launches, not what a launched worker may itself do.

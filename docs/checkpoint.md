@@ -108,9 +108,11 @@ and a real temp store, `TestResumeTransitionReconcileExactlyOnce` /
   checkpoint; the tests assert no leftover `.state-*.tmp` file and a complete,
   valid, newline-terminated JSON file.
 - **Versioned format.** `State.Version` is `2` (adds the `inFlight` intent log).
-  `Load` **upgrades** a version-`1` file (no intent log) to version `2` in
-  memory; any other version is refused with a deterministic error — there is no
-  guessed-at upgrade.
+  `Load` **upgrades** an older file to the current version through the ordered
+  migration registry (`checkpointMigrations`, `{1 -> 2}`); a version the registry
+  cannot reach is refused with the typed `loop.ErrCheckpointUnmigratable` — there
+  is no guessed-at upgrade and no partial one. The registry, the supported
+  range and the refusal semantics are in [`upgrade.md`](upgrade.md).
 - **Deterministic bytes.** `Done` (sorted, de-duplicated) and `InFlight`
   (sorted by candidate id, last intent per candidate) are normalized before
   encoding, so the same logical state is byte-stable.
