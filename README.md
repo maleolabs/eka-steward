@@ -58,6 +58,7 @@ internal/obs/           observability: structured step log, metrics, run report,
 internal/guard/         worker containment: env allow-list, per-worker worktree, permission policy, driver pinning
 internal/driver/        deterministic driver registry (parse/resolve/select + probe seam)
 internal/role/          steward worker-role config (parse + resolve; no EKA)
+internal/config/        versioned, strict combined config schema (composes role/driver/sizing; no EKA)
 internal/sizing/        pure worker-count sizing (no I/O, no LLM)
 internal/render/        pure, bounded context-payload renderer (stdlib only)
 internal/plan/          pure dependency-graph planner: topological + container + state order (no I/O, no LLM)
@@ -75,6 +76,7 @@ docs/determinism.md      code decides which/when/if, the LLM decides what
 docs/drivers.md          driver registry: config, adapters, probing (never writes EKA)
 docs/guardrails.md       worker containment: four layers, VCS-isolation-not-a-boundary, residual risks
 docs/roles.md            roles are steward config; no role reads or writes EKA
+docs/config.md           the one versioned, strict config schema (roles/drivers/sizing/sandbox/loop) + migration policy
 docs/sizing.md           the deterministic worker-count formula (no LLM input)
 docs/context.md          the bounded, byte-stable context payload (never writes EKA)
 scripts/bump.sh          version bump + tag automation
@@ -130,6 +132,19 @@ dispatch order, and the determinism test rule (same input → byte-identical
 output; an LLM-call spy must never fire). The pure ordering/selection
 kernel that pins the order is `internal/decision` — stdlib only, no I/O,
 clock, randomness or LLM.
+
+## Configuration
+
+The steward's configuration is **one versioned, strict document** combining
+every section — `roles`, `drivers`, `sizing`, `sandbox` and `loop` — under a
+single `version` field. `internal/config` parses it strictly (unknown fields
+refused anywhere), reuses the per-section parsers (`internal/role`,
+`internal/driver`, `internal/sizing`) so config and standalone behaviour
+agree, gates and migrates the version, and validates across sections (at
+least one role, every role's driver declared, `sizing.maxWorkers >= 1`,
+sandbox contained by default). The full schema, the strictness rules, the
+validation rules and the version/migration policy live in
+[`docs/config.md`](docs/config.md).
 
 ## Roles
 

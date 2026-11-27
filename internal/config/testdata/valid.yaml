@@ -1,0 +1,31 @@
+# eka-steward config — ONE versioned, strict document for every section.
+# This is the golden fixture: internal/config/config_test.go pins it.
+version: 1
+
+roles:
+  - name: implementer
+    driver: opencode
+    template: prompts/implementer.md
+  - name: reviewer
+    driver: claude
+    template: prompts/reviewer.md
+    review: true
+
+drivers:
+  - tool: opencode
+    cmd: opencode
+    args: [acp]
+  - tool: claude
+    cmd: claude
+
+sizing:
+  maxWorkers: 4
+  costCeiling: 2
+
+sandbox:
+  worktreeBase: /var/lib/eka-steward/worktrees
+
+loop:
+  maxAttempts: 3
+  queueLimit: 8
+  attemptTimeout: 30s

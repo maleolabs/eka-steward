@@ -1,0 +1,13 @@
+# Legacy version-0 document: roles + drivers only. It predates the `sizing`
+# section (added in v1), so Parse migrates it to v1 and fills the sizing
+# default (the floor of 1 worker). Used by TestMigrateV0ToCurrent.
+version: 0
+
+roles:
+  - name: implementer
+    driver: claude
+    template: prompts/implementer.md
+
+drivers:
+  - tool: claude
+    cmd: claude
