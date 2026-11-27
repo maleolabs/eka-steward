@@ -36,6 +36,7 @@ import (
 
 	"github.com/maleolabs/eka-steward/v2/internal/decision"
 	"github.com/maleolabs/eka-steward/v2/internal/obs"
+	"github.com/maleolabs/eka-steward/v2/internal/plan"
 	"github.com/maleolabs/eka-steward/v2/internal/pool"
 	"github.com/maleolabs/eka-steward/v2/internal/sizing"
 )
@@ -45,6 +46,16 @@ import (
 // (StoreSource) reads through api.Knowledge only.
 type Source interface {
 	Candidates(ctx context.Context) ([]decision.Candidate, error)
+}
+
+// GraphSource is the OPTIONAL Source capability: it yields the dependency
+// graph (nodes + depends-on edges) the planner orders, so selection can
+// honour prerequisites (internal/plan). A Source that does not implement it
+// is planned as a flat candidate set — every node in one container order with
+// no edges — which is byte-identical to the pre-planner order. StoreSource
+// implements it read-only.
+type GraphSource interface {
+	Graph(ctx context.Context) ([]plan.Node, []plan.Edge, error)
 }
 
 // DispatchResult is the opaque outcome of one dispatch. Its Output is treated
@@ -215,21 +226,23 @@ func New(source Source, dispatcher Dispatcher, writer Writer, state *Store, cfg 
 // Plan returns the deterministic step sequence the loop would emit from the
 // current source set, skipping work already recorded done. It is a PURE
 // selection: it reads the Source and the persisted state, orders the
-// candidates with internal/decision.Order, and never calls the Dispatcher.
-// The same source set + state yields byte-identical Steps over any number of
-// calls and any permutation of the input.
+// candidates with internal/plan (topological over depends-on, then the
+// container/decision tie-break), drops non-dispatchable and blocked
+// candidates, and never calls the Dispatcher. The same source set + state
+// yields byte-identical Steps over any number of calls and any permutation of
+// the input.
 func (l *Loop) Plan(ctx context.Context) ([]Step, error) {
-	cs, err := l.selectable(ctx)
+	nodes, edges, err := l.selectableGraph(ctx)
 	if err != nil {
 		return nil, err
 	}
-	ordered := decision.Order(cs)
-	steps := make([]Step, 0, len(ordered))
-	for _, c := range ordered {
-		if !ready(c) {
-			continue
-		}
-		steps = append(steps, stepFor(c))
+	sel, err := plan.Selectable(nodes, edges)
+	if err != nil {
+		return nil, err
+	}
+	steps := make([]Step, 0, len(sel))
+	for _, n := range sel {
+		steps = append(steps, stepFor(candidateOf(n)))
 	}
 	return steps, nil
 }
@@ -241,15 +254,18 @@ func (l *Loop) Plan(ctx context.Context) ([]Step, error) {
 // recorded done — each transition saved atomically. A crash at any boundary is
 // recovered by the next Run's resume pass (docs/checkpoint.md).
 func (l *Loop) Step(ctx context.Context) (Step, bool, error) {
-	cs, err := l.selectable(ctx)
+	nodes, edges, err := l.selectableGraph(ctx)
 	if err != nil {
 		return Step{}, false, err
 	}
-	c, ok := decision.SelectNext(cs)
-	if !ok {
+	sel, err := plan.Selectable(nodes, edges)
+	if err != nil {
+		return Step{}, false, err
+	}
+	if len(sel) == 0 {
 		return Step{}, false, nil
 	}
-	step, err := l.runStep(ctx, c)
+	step, err := l.runStep(ctx, candidateOf(sel[0]))
 	if err != nil {
 		return step, true, err
 	}
@@ -674,18 +690,20 @@ func (l *Loop) runSequential(ctx context.Context) error {
 // planning and drains (docs/backpressure.md). The accepted set is therefore a
 // pure function of the candidate set, QueueLimit and the persisted state.
 func (l *Loop) runPooled(ctx context.Context) error {
-	cs, err := l.selectable(ctx)
+	nodes, edges, err := l.selectableGraph(ctx)
 	if err != nil {
 		return err
 	}
-	var dispatchable []decision.Candidate
-	for _, c := range decision.Order(cs) {
-		if ready(c) {
-			dispatchable = append(dispatchable, c)
-		}
+	sel, err := plan.Selectable(nodes, edges)
+	if err != nil {
+		return err
 	}
-	if len(dispatchable) == 0 {
+	if len(sel) == 0 {
 		return nil
+	}
+	dispatchable := make([]decision.Candidate, 0, len(sel))
+	for _, n := range sel {
+		dispatchable = append(dispatchable, candidateOf(n))
 	}
 
 	// MaxWorkers comes from the sizing policy, never from a raw config value:
@@ -893,11 +911,49 @@ func (l *Loop) now() time.Time {
 	return time.Now()
 }
 
-// ready reports whether a candidate is in a dispatchable state. It mirrors
-// the decision kernel's unexported dispatchable rule: only the ready states,
-// planned and todo.
-func ready(c decision.Candidate) bool {
-	return c.State == decision.StatePlanned || c.State == decision.StateTodo
+// selectableGraph returns the planning input for one selection: the source's
+// nodes minus work already recorded done, plus its depends-on edges. When the
+// Source implements GraphSource the real graph is used; otherwise the flat
+// candidate set is projected into nodes (no container order, no edges), which
+// the planner orders identically to decision.Order.
+func (l *Loop) selectableGraph(ctx context.Context) ([]plan.Node, []plan.Edge, error) {
+	if gs, ok := l.source.(GraphSource); ok {
+		nodes, edges, err := gs.Graph(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("loop: read graph: %w", err)
+		}
+		st, err := l.state.Load()
+		if err != nil {
+			return nil, nil, err
+		}
+		return dropDoneNodes(nodes, st), edges, nil
+	}
+	cs, err := l.selectable(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	nodes := make([]plan.Node, 0, len(cs))
+	for _, c := range cs {
+		nodes = append(nodes, plan.Node{ID: c.ID, State: c.State, Priority: c.Priority, CreatedSeq: c.CreatedSeq})
+	}
+	return nodes, nil, nil
+}
+
+// dropDoneNodes returns nodes without any whose ID is recorded done.
+func dropDoneNodes(nodes []plan.Node, st State) []plan.Node {
+	out := make([]plan.Node, 0, len(nodes))
+	for _, n := range nodes {
+		if !st.Has(n.ID) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// candidateOf projects a plan node back into the loop's candidate view for
+// dispatch and mutation. The container keys are plan-only and dropped.
+func candidateOf(n plan.Node) decision.Candidate {
+	return decision.Candidate{ID: n.ID, State: n.State, Priority: n.Priority, CreatedSeq: n.CreatedSeq}
 }
 
 // stepFor projects a candidate into a Step.

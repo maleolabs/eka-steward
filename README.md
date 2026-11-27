@@ -60,9 +60,11 @@ internal/driver/        deterministic driver registry (parse/resolve/select + pr
 internal/role/          steward worker-role config (parse + resolve; no EKA)
 internal/sizing/        pure worker-count sizing (no I/O, no LLM)
 internal/render/        pure, bounded context-payload renderer (stdlib only)
+internal/plan/          pure dependency-graph planner: topological + container + state order (no I/O, no LLM)
 docs/adr/                architecture decision records
 docs/boundary.md         the two hard boundary rules (api-only, one escape hatch)
 docs/control-loop.md     control loop: seams, pure Plan vs Step, lock, cgroup, state
+docs/selection.md        work-selection spec: topological over depends-on, container order, blocked rule, no LLM
 docs/discuss.md          discussion phase: lifecycle, code vs LLM split, recorded dec-, resume, next-phase input
 docs/backpressure.md     bounded worker pool: sizing-bounded concurrency, deterministic overflow, metrics
 docs/checkpoint.md       crash-safe checkpoint/resume: intent log, reconcile, crash matrix
