@@ -1,0 +1,4 @@
+# golden transcript: request line, then expected response line
+# init: false
+{"jsonrpc":"2.0","id":1,"method":"steward/initialize","params":{"protocolVersions":["1"]}}
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"1","capabilities":{"methods":["steward/initialize","steward/plan","steward/step","steward/run","steward/resume","steward/cancel","steward/approve","steward/status","steward/shutdown","steward/events.subscribe","steward/events.unsubscribe"],"events":["step","dispatch","write","approval","metrics"]}}}

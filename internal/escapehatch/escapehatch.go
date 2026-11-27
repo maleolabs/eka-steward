@@ -15,6 +15,10 @@
 //   - Only the passed Env reaches the child; an empty Env means an empty
 //     environment, never the parent's.
 //   - Cancellation is honoured: a cancelled context returns its error.
+//
+// Run captures whole streams; Start exposes them as pipes for a streaming
+// protocol (the ACP client) with exactly the same allow-list, env and
+// no-shell guarantees.
 package escapehatch
 
 import (
@@ -22,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"path/filepath"
 )
@@ -76,20 +81,18 @@ func (a AllowList) Allows(base string) bool {
 	return ok
 }
 
-// Run executes s if its executable base name is allowed. A disallowed or
-// unknown command returns a *deterministic* error wrapping ErrNotAllowed
-// that names the command. The argv is exec'd directly (no shell), only
-// the passed Env is given to the child, and a cancelled ctx returns
-// ctx.Err().
-func (a AllowList) Run(ctx context.Context, s Spec) (Result, error) {
+// command validates s and builds the direct-exec *exec.Cmd shared by Run and
+// Start. The base name must be in the allow-list, a cancelled ctx is refused
+// before any spawn, and the child environment is exactly s.Env (nil = empty),
+// so no parent variable ever leaks.
+func (a AllowList) command(ctx context.Context, s Spec) (*exec.Cmd, error) {
 	base := filepath.Base(s.Name)
 	if !a.Allows(base) {
-		return Result{}, fmt.Errorf("%w: %q", ErrNotAllowed, base)
+		return nil, fmt.Errorf("%w: %q", ErrNotAllowed, base)
 	}
 	if err := ctx.Err(); err != nil {
-		return Result{}, err
+		return nil, err
 	}
-
 	cmd := exec.CommandContext(ctx, s.Name, s.Args...)
 	cmd.Dir = s.Dir
 	if s.Env != nil {
@@ -97,12 +100,25 @@ func (a AllowList) Run(ctx context.Context, s Spec) (Result, error) {
 	} else {
 		cmd.Env = []string{}
 	}
+	return cmd, nil
+}
+
+// Run executes s if its executable base name is allowed. A disallowed or
+// unknown command returns a *deterministic* error wrapping ErrNotAllowed
+// that names the command. The argv is exec'd directly (no shell), only
+// the passed Env is given to the child, and a cancelled ctx returns
+// ctx.Err().
+func (a AllowList) Run(ctx context.Context, s Spec) (Result, error) {
+	cmd, err := a.command(ctx, s)
+	if err != nil {
+		return Result{}, err
+	}
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err = cmd.Run()
 	res := Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
 	if err == nil {
 		return res, nil
@@ -117,3 +133,71 @@ func (a AllowList) Run(ctx context.Context, s Spec) (Result, error) {
 	}
 	return res, err // could not start the process
 }
+
+// Proc is a running child process started through Start. Its stdin is
+// writable and its stdout/stderr are readable, so a caller can speak a
+// streaming protocol (ACP) over the pipes. Call Wait (or Kill) to reap it.
+type Proc struct {
+	ctx    context.Context
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout io.ReadCloser
+	stderr io.ReadCloser
+}
+
+// Stdin returns the child's writable standard input.
+func (p *Proc) Stdin() io.WriteCloser { return p.stdin }
+
+// Stdout returns the child's readable standard output.
+func (p *Proc) Stdout() io.ReadCloser { return p.stdout }
+
+// Stderr returns the child's readable standard error.
+func (p *Proc) Stderr() io.ReadCloser { return p.stderr }
+
+// Start launches s exactly like Run — same allow-list, no shell, exactly
+// s.Env — but wired to pipes instead of captured buffers, so the caller can
+// stream over stdio. A cancelled ctx (or a later cancel) terminates the
+// child; Wait then returns ctx.Err(). A disallowed command returns the same
+// deterministic ErrNotAllowed refusal Run does.
+func (a AllowList) Start(ctx context.Context, s Spec) (*Proc, error) {
+	cmd, err := a.command(ctx, s)
+	if err != nil {
+		return nil, err
+	}
+	configureSysProcAttr(cmd)
+	// Kill the whole child process group (unix) so an agent's own children
+	// cannot outlive a cancel and hold the pipes open.
+	cmd.Cancel = func() error { return killProcess(cmd) }
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return &Proc{ctx: ctx, cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr}, nil
+}
+
+// Wait reaps the child. It returns nil on a clean (zero) exit, ctx.Err()
+// when the context was cancelled or the process was killed by it, and the
+// underlying error (e.g. *exec.ExitError) otherwise.
+func (p *Proc) Wait() error {
+	err := p.cmd.Wait()
+	if ctxErr := p.ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return err
+}
+
+// Kill terminates the child (and, on unix, its process group). It is
+// idempotent and safe after the process has already exited.
+func (p *Proc) Kill() error { return killProcess(p.cmd) }

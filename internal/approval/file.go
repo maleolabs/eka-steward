@@ -30,13 +30,26 @@ const (
 	DefaultPollInterval = 100 * time.Millisecond
 )
 
-// response is the on-disk answer shape (written by a human or an operator
-// tool). It carries the request Key so a stale answer is never applied.
-type response struct {
+// Response is the on-disk answer shape (written by a human, an operator tool or
+// the steward's protocol surface). It carries the request Key so a stale answer
+// is never applied.
+type Response struct {
 	Key     string  `json:"key"`
 	Verdict Verdict `json:"verdict"`
 	By      string  `json:"by,omitempty"`
 	Reason  string  `json:"reason,omitempty"`
+}
+
+// WriteResponse writes one decision to the file/queue channel at dir,
+// atomically, in the exact shape Ask's readResponse consumes. It is the
+// operator/consumer side of the channel: an external process answers a pending
+// request without a TTY. A response only answers the request whose Key it
+// carries; a mismatch is ignored by Ask.
+func WriteResponse(dir string, r Response) error {
+	if dir == "" {
+		return errors.New("approval: WriteResponse needs a Dir")
+	}
+	return writeJSON(filepath.Join(dir, DefaultResponseFile), r)
 }
 
 // FileApprover is the file/queue Approver. Dir is required and must exist;
@@ -110,7 +123,7 @@ func readResponse(path, key string) (Decision, bool) {
 	if err != nil {
 		return Decision{}, false
 	}
-	var r response
+	var r Response
 	if err := json.Unmarshal(b, &r); err != nil {
 		return Decision{}, false
 	}

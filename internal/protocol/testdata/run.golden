@@ -1,0 +1,4 @@
+# golden transcript: request line, then expected response line
+# init: true
+{"jsonrpc":"2.0","id":4,"method":"steward/run","params":{"project":"p"}}
+{"jsonrpc":"2.0","id":4,"result":{"runId":"run-1"}}

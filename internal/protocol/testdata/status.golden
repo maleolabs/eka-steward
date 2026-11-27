@@ -1,0 +1,4 @@
+# golden transcript: request line, then expected response line
+# init: true
+{"jsonrpc":"2.0","id":6,"method":"steward/status","params":{}}
+{"jsonrpc":"2.0","id":6,"result":{"runId":"","state":"idle","counters":{"steps":0,"retries":0,"cancellations":0,"peakInFlight":0,"peakQueueDepth":0,"inFlight":0,"queueDepth":0,"dispatched":0,"rejected":0},"lastStep":null,"report":{"steps":[],"writes":[]}}}

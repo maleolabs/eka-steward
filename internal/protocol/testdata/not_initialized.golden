@@ -1,0 +1,4 @@
+# golden transcript: request line, then expected response line
+# init: false
+{"jsonrpc":"2.0","id":1,"method":"steward/plan","params":{"project":"p"}}
+{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"not initialized: call steward/initialize first"}}
