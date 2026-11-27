@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
@@ -121,6 +122,171 @@ func TestNoMCPDependency(t *testing.T) {
 				i+1, strings.TrimSpace(line))
 		}
 	}
+}
+
+// ekawritePackage is the one and only non-test package allowed to call the
+// MUTATING surface of an api.Authoring value. It is deliberately a single
+// adapter (internal/ekawrite) so every EKA write is audited in one place and
+// no other package can quietly become a second write path. Reading EKA
+// (api.Knowledge / Resolver / Workspace / Integrity / Contexts) stays allowed
+// everywhere. See docs/write-path.md.
+const ekawritePackage = "internal/ekawrite"
+
+// authoringMutations is the mutating surface of api.Authoring that only
+// internal/ekawrite may call.
+var authoringMutations = map[string]bool{
+	"NewDraft":     true,
+	"Publish":      true,
+	"PublishBatch": true,
+	"Transition":   true,
+	"Relate":       true,
+	"NoteDraft":    true,
+	"DiscardDraft": true,
+	"Sync":         true,
+	"SyncAdopt":    true,
+}
+
+// TestEKAMutationsOnlyInEkawrite fails if any non-test .go file outside
+// internal/ekawrite calls a mutating method on an api.Authoring value —
+// either a direct `rt.Authoring().Publish(...)` or a method on a value typed
+// (or assigned from) api.Authoring. It also fails if the pin goes stale
+// (ekawrite no longer calls the surface), mirroring the escapeHatch pin.
+func TestEKAMutationsOnlyInEkawrite(t *testing.T) {
+	root := moduleRoot(t)
+
+	var violations []string
+	ekawriteCalls := 0
+	for _, rel := range nonTestGoFiles(t, root) {
+		calls := authoringMutationCalls(t, filepath.Join(root, rel))
+		if filepath.Dir(rel) == ekawritePackage {
+			ekawriteCalls += len(calls)
+			continue
+		}
+		for _, c := range calls {
+			violations = append(violations, rel+": "+c)
+		}
+	}
+	sort.Strings(violations)
+	if len(violations) > 0 {
+		t.Fatalf("only %s may call the api.Authoring write surface %v; offending calls:\n  %s",
+			ekawritePackage, authoringMutationNames(), strings.Join(violations, "\n  "))
+	}
+	if ekawriteCalls == 0 {
+		t.Fatalf("stale pin: %s no longer calls the api.Authoring write surface; update or remove ekawritePackage", ekawritePackage)
+	}
+}
+
+// authoringMutationNames returns the mutating method names sorted (the
+// failure message is deterministic).
+func authoringMutationNames() []string {
+	names := make([]string, 0, len(authoringMutations))
+	for n := range authoringMutations {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// authoringMutationCalls parses the file at path and returns a description of
+// every call to a mutating api.Authoring method. A call qualifies when its
+// selector name is in authoringMutations and its receiver is either a
+// `...Authoring()` call or an identifier known to hold an api.Authoring value
+// (declared with that type, or assigned from `...Authoring()`).
+func authoringMutationCalls(t *testing.T, path string) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	authoring := authoringIdents(f)
+	var calls []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || !authoringMutations[sel.Sel.Name] {
+			return true
+		}
+		if isAuthoringReceiver(sel.X, authoring) {
+			calls = append(calls, sel.Sel.Name+"()")
+		}
+		return true
+	})
+	return calls
+}
+
+// isAuthoringReceiver reports whether expr is a receiver expression that
+// resolves to an api.Authoring value.
+func isAuthoringReceiver(expr ast.Expr, authoring map[string]bool) bool {
+	switch e := expr.(type) {
+	case *ast.CallExpr:
+		switch fun := e.Fun.(type) {
+		case *ast.SelectorExpr:
+			return fun.Sel.Name == "Authoring"
+		case *ast.Ident:
+			return fun.Name == "Authoring"
+		}
+	case *ast.Ident:
+		return authoring[e.Name]
+	}
+	return false
+}
+
+// authoringIdents collects the identifiers of file f bound to an
+// api.Authoring value: declared with that type, or assigned from an
+// `...Authoring()` call.
+func authoringIdents(f *ast.File) map[string]bool {
+	ids := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch decl := n.(type) {
+		case *ast.ValueSpec:
+			if isAuthoringType(decl.Type) {
+				for _, name := range decl.Names {
+					ids[name.Name] = true
+				}
+			}
+		case *ast.AssignStmt:
+			for i, rhs := range decl.Rhs {
+				if !isAuthoringCall(rhs) || i >= len(decl.Lhs) {
+					continue
+				}
+				if id, ok := decl.Lhs[i].(*ast.Ident); ok {
+					ids[id.Name] = true
+				}
+			}
+		case *ast.Field:
+			// Function parameters/results and struct fields.
+			if isAuthoringType(decl.Type) {
+				for _, name := range decl.Names {
+					ids[name.Name] = true
+				}
+			}
+		}
+		return true
+	})
+	return ids
+}
+
+// isAuthoringType reports whether expr is the selector api.Authoring.
+func isAuthoringType(expr ast.Expr) bool {
+	sel, ok := expr.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "api" && sel.Sel.Name == "Authoring"
+}
+
+// isAuthoringCall reports whether expr is an `...Authoring()` call.
+func isAuthoringCall(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	return isAuthoringReceiver(call.Fun, nil)
 }
 
 // isForbidden reports whether import path p names a kernel-internal
