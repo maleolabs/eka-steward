@@ -48,8 +48,14 @@ cmd/                     Cobra command tree (the only production package)
   version.go             version var (ldflags) + `version` command
   *_test.go              boundary, layout-pin and version tests
 internal/escapehatch/    the one audited subprocess adapter (allow-list)
+internal/decision/      pure, deterministic selection/order kernel (stdlib only)
+internal/role/          steward worker-role config (parse + resolve; no EKA)
+internal/sizing/        pure worker-count sizing (no I/O, no LLM)
 docs/adr/                architecture decision records
 docs/boundary.md         the two hard boundary rules (api-only, one escape hatch)
+docs/determinism.md      code decides which/when/if, the LLM decides what
+docs/roles.md            roles are steward config; no role reads or writes EKA
+docs/sizing.md           the deterministic worker-count formula (no LLM input)
 scripts/bump.sh          version bump + tag automation
 anvil.yaml               anvil project + lifecycle definition
 .anvil/pipelines/        CI and release build pipelines
@@ -92,6 +98,36 @@ non-test package may import `os/exec`, and the adapter runs only
 allow-listed executable base names. MCP is not a dependency. Both rules
 and the allow-list policy are documented in
 [`docs/boundary.md`](docs/boundary.md) and enforced by tests.
+
+## Determinism
+
+Steward's core split — **code decides *which* / *when* / *if*, the LLM
+decides *what*** — is specified in
+[`docs/determinism.md`](docs/determinism.md): the code-owned vs LLM-owned
+table, every control-flow decision point shown to be LLM-free, the total
+dispatch order, and the determinism test rule (same input → byte-identical
+output; an LLM-call spy must never fire). The pure ordering/selection
+kernel that pins the order is `internal/decision` — stdlib only, no I/O,
+clock, randomness or LLM.
+
+## Roles
+
+Worker roles are **steward config** — a role resolves deterministically
+to a driver name + a prompt template, and **no role reads or writes
+EKA**. The config shape, resolution rules and strictness rules live in
+[`docs/roles.md`](docs/roles.md); the parser/validator is
+`internal/role` (stdlib + `gopkg.in/yaml.v3` only; imports no EKA
+package and no filesystem/network/subprocess).
+
+## Worker sizing
+
+The number of workers is **deterministic and LLM-free** — a pure function
+of a machine snapshot and config (`internal/sizing`, stdlib only).
+`clamp(min(CPUCores/2, MemoryBytes/4GiB), 1, MaxWorkers)`, optionally
+reduced by a cost ceiling. The formula, the clamp, the cost-ceiling rule
+and the edge-behaviour table are in
+[`docs/sizing.md`](docs/sizing.md). Reading `cgroup` v2 to fill the
+snapshot is a separate, later control-loop work item.
 
 ## Deliberate omissions vs eka-cli
 
