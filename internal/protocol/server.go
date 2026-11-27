@@ -44,12 +44,26 @@ const (
 	MethodApprove    = "steward/approve"
 	MethodStatus     = "steward/status"
 	MethodShutdown   = "steward/shutdown"
+
+	MethodEventsSubscribe   = "steward/events.subscribe"
+	MethodEventsUnsubscribe = "steward/events.unsubscribe"
 )
+
+// MethodEvent is the server-to-client notification method that carries one
+// stream event (no id).
+const MethodEvent = "steward/event"
 
 // methodList is the deterministic capability list initialize advertises.
 var methodList = []string{
 	MethodInitialize, MethodPlan, MethodStep, MethodRun, MethodResume,
 	MethodCancel, MethodApprove, MethodStatus, MethodShutdown,
+	MethodEventsSubscribe, MethodEventsUnsubscribe,
+}
+
+// eventTypes is the deterministic capability list of stream event types
+// (capabilities.events).
+var eventTypes = []string{
+	obs.EventStep, obs.EventDispatch, obs.EventWrite, obs.EventApproval, obs.EventMetrics,
 }
 
 // JSON-RPC 2.0 error codes. The standard codes are the spec's; the -320xx
@@ -102,6 +116,10 @@ type Engine interface {
 	Status() app.Status
 	// Approve materializes one human decision for the given request id.
 	Approve(requestID, decision string) error
+	// Subscribe registers a live event subscriber (types nil/empty = all),
+	// replaying buffered events with seq >= fromSeq. It returns the receive
+	// channel and an idempotent cancel func.
+	Subscribe(types []string, fromSeq uint64) (<-chan obs.Event, func(), error)
 	// Close releases the engine's resources.
 	Close() error
 }
@@ -145,6 +163,8 @@ type Server struct {
 	runSeq     int
 	idem       map[string]idemEntry
 	stopping   bool
+	subs       map[string]func()
+	subSeq     int
 
 	outMu sync.Mutex
 	out   *bufio.Writer
@@ -158,6 +178,7 @@ func NewServer(eng Engine) *Server {
 		maxLineSize: defaultMaxLineSize,
 		runs:        map[string]*runHandle{},
 		idem:        map[string]idemEntry{},
+		subs:        map[string]func(){},
 	}
 }
 
@@ -186,6 +207,7 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 		s.outMu.Lock()
 		s.out = nil
 		s.outMu.Unlock()
+		s.cancelSubscriptions()
 	}()
 
 	for {
@@ -354,6 +376,10 @@ func (s *Server) dispatch(req request) []byte {
 		return s.handleStatus(req)
 	case MethodShutdown:
 		return s.handleShutdown(req)
+	case MethodEventsSubscribe:
+		return s.handleEventsSubscribe(req)
+	case MethodEventsUnsubscribe:
+		return s.handleEventsUnsubscribe(req)
 	default:
 		return s.errorResponse(req.ID, codeMethodNotFound, "method not found: "+req.Method)
 	}
@@ -409,7 +435,7 @@ func (s *Server) handleInitialize(req request) []byte {
 	s.negotiated = v
 	s.mu.Unlock()
 
-	events := []string{}
+	events := append([]string(nil), eventTypes...)
 	methods := append([]string(nil), methodList...)
 	return s.resultJSON(req.ID, initializeResult{
 		ProtocolVersion: v,
@@ -721,6 +747,115 @@ func (s *Server) handleStatus(req request) []byte {
 		s.mu.Unlock()
 	}
 	return s.resultJSON(req.ID, res)
+}
+
+// --- events ---
+
+type subscribeParams struct {
+	Types   []string `json:"types"`
+	FromSeq uint64   `json:"fromSeq"`
+}
+
+type subscribeResult struct {
+	Subscribed     bool   `json:"subscribed"`
+	FromSeq        uint64 `json:"fromSeq"`
+	SubscriptionID string `json:"subscriptionId"`
+}
+
+type unsubscribeParams struct {
+	SubscriptionID string `json:"subscriptionId"`
+}
+
+type unsubscribeResult struct {
+	Unsubscribed bool `json:"unsubscribed"`
+}
+
+// eventParams is the shape of one steward/event notification: {seq, type, data}.
+// The payload is already redacted by obs.Stream; the protocol never re-leaks it.
+type eventParams struct {
+	Seq  uint64 `json:"seq"`
+	Type string `json:"type"`
+	Data any    `json:"data"`
+}
+
+// handleEventsSubscribe registers a live subscriber with the engine and starts
+// ONE forwarding goroutine that writes each event as a steward/event
+// notification under the server writer mutex (ordering preserved by seq). The
+// returned subscriptionId is what events.unsubscribe consumes.
+func (s *Server) handleEventsSubscribe(req request) []byte {
+	var p subscribeParams
+	if !decodeInto(req.Params, &p) {
+		return s.invalidParams(req.ID, MethodEventsSubscribe)
+	}
+	ch, cancel, err := s.eng.Subscribe(p.Types, p.FromSeq)
+	if err != nil {
+		return s.internal(req.ID, "events.subscribe", err)
+	}
+	id := s.addSubscription(cancel)
+	go s.forwardEvents(ch, id)
+	return s.resultJSON(req.ID, subscribeResult{Subscribed: true, FromSeq: p.FromSeq, SubscriptionID: id})
+}
+
+// forwardEvents drains one subscription, writing each event as a notification.
+// It returns when the subscription channel closes (unsubscribe or connection
+// close) — no goroutine leak.
+func (s *Server) forwardEvents(ch <-chan obs.Event, id string) {
+	for ev := range ch {
+		_ = s.Notify(MethodEvent, eventParams{Seq: ev.Seq, Type: ev.Type, Data: ev.Data})
+	}
+	s.mu.Lock()
+	delete(s.subs, id)
+	s.mu.Unlock()
+}
+
+// handleEventsUnsubscribe cancels one subscription by id. An unknown id is a
+// deterministic invalid-params refusal.
+func (s *Server) handleEventsUnsubscribe(req request) []byte {
+	var p unsubscribeParams
+	if !decodeInto(req.Params, &p) {
+		return s.invalidParams(req.ID, MethodEventsUnsubscribe)
+	}
+	if p.SubscriptionID == "" {
+		return s.errorResponse(req.ID, CodeInvalidParams, "steward/events.unsubscribe requires a non-empty subscriptionId")
+	}
+	s.mu.Lock()
+	cancel, ok := s.subs[p.SubscriptionID]
+	if ok {
+		delete(s.subs, p.SubscriptionID)
+	}
+	s.mu.Unlock()
+	if !ok {
+		return s.errorResponse(req.ID, CodeInvalidParams, "unknown subscription: "+p.SubscriptionID)
+	}
+	if cancel != nil {
+		cancel()
+	}
+	return s.resultJSON(req.ID, unsubscribeResult{Unsubscribed: true})
+}
+
+// addSubscription records a subscription's cancel func under a monotonic
+// per-connection id.
+func (s *Server) addSubscription(cancel func()) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.subSeq++
+	id := "sub-" + strconv.Itoa(s.subSeq)
+	s.subs[id] = cancel
+	return id
+}
+
+// cancelSubscriptions cancels every live subscription (Serve cleanup). The map
+// is swapped under the lock, then each cancel is called outside it.
+func (s *Server) cancelSubscriptions() {
+	s.mu.Lock()
+	subs := s.subs
+	s.subs = map[string]func(){}
+	s.mu.Unlock()
+	for _, cancel := range subs {
+		if cancel != nil {
+			cancel()
+		}
+	}
 }
 
 // --- shutdown ---

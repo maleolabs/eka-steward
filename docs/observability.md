@@ -138,6 +138,57 @@ substrings of free-form LLM text are secret. Treat the worker environment as
 the primary containment (`guardrails.md`: no credential variables are
 inherited) and redaction as a best-effort backstop.
 
+## 6. Live event stream (`events.subscribe`)
+
+`obs.Stream` is a second loop `Observer` (alongside the `Recorder`) that fans
+the seam out to live subscribers as ordered, monotonic, **redacted** events. The
+app composes the two with `obs.Composite{rec, stream}` and wires it as
+`loop.Config.Observer`, so one loop feeds both the report and the stream.
+
+Event types (`capabilities.events`): `step` · `dispatch` · `write` ·
+`approval` · `metrics`.
+
+| Type | Source | Payload (redacted) |
+| --- | --- | --- |
+| `step` | `Observer.Step` | `{candidateId, kind, outcome, durationMs}` |
+| `dispatch` | derived from `StepEvent` | `{candidateId, attempts, outcome}` |
+| `write` | `Observer.Write` | `{line, kind, result, instanceVersion}` |
+| `approval` | `App.Approve` → `Stream.EmitApproval` | `{requestId, decision}` |
+| `metrics` | `Recorder.Snapshot()` after each step | the snapshot counters |
+
+The protocol surface:
+
+| method | params | result |
+| --- | --- | --- |
+| `steward/events.subscribe` | `{types?, fromSeq?}` | `{subscribed, fromSeq, subscriptionId}` |
+| `steward/events.unsubscribe` | `{subscriptionId}` | `{unsubscribed}` |
+
+Each `Event` is delivered as a `steward/event` notification, params
+`{seq, type, data}` (no id). One forwarding goroutine per subscription writes
+each notification under the server's writer mutex; `seq` preserves order
+because the Stream assigns it and delivers under one mutex. `unsubscribe` or
+connection close cancels the subscription and closes its channel, so the
+goroutine exits (no leak).
+
+**Ordering.** Every real event gets a strictly increasing, gap-free `seq`
+assigned under the stream mutex. `seq` is global across all types: a subscriber
+that filters by `types` may observe `seq` gaps for the types it did not
+request.
+
+**Backpressure (bounded, never blocks the loop).** Each subscriber has a
+bounded buffer (`defaultBuffer` = 64). Delivery is **non-blocking**: when the
+buffer is full the event is dropped and, once space frees, the subscriber
+receives exactly **one** synthetic `gap` event per dropped burst recording the
+range `{fromSeq, toSeq}`. The gap event's own `seq` is `fromSeq`, keeping it
+ordered after the last delivered event and before the next. Gap events bypass
+the type filter (they describe that subscriber's own loss). `fromSeq` replays
+from a bounded ring (256 events); a replay larger than the buffer may itself
+yield a `gap`.
+
+**Residual risk.** Redaction is the same pattern-based `Redactor` of §5: every
+string field of every event payload is passed through it, but a secret that
+matches no pattern and is not on the deny-list still passes through.
+
 ## Where this is enforced
 
 | Guarantee | Test |
@@ -147,3 +198,8 @@ inherited) and redaction as a best-effort backstop.
 | report lists steps and EKA writes (deterministic; store-backed) | `internal/obs` `TestReportListsStepsAndWrites`, `internal/loop` `TestObservabilityStoreBackedWriteListing` |
 | report is byte-identical across runs | `internal/obs` `TestReportDeterministicAcrossRuns`, `internal/loop` `TestObservabilityReportDeterministicAcrossRuns` |
 | secret-like input never appears in logs or the report | `internal/obs` `TestRedactionNeverLeaksSecrets` |
+| exact, monotonic event sequence for a fake run | `internal/obs` `TestStreamExactSequence` |
+| every event payload is redacted | `internal/obs` `TestStreamRedaction` |
+| overflow yields one deterministic gap marker (bounded, no hang) | `internal/obs` `TestStreamBackpressureGap` |
+| cancel closes the subscriber channel (no goroutine leak) | `internal/obs` `TestStreamCancelClosesChannel` |
+| `events.subscribe` emits `steward/event` notifications interleaved with replies | `internal/protocol` `TestEventsSubscribeOverPipe` |

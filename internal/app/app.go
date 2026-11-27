@@ -82,6 +82,7 @@ type App struct {
 	state    *loop.Store
 	loop     *loop.Loop
 	recorder *obs.Recorder
+	stream   *obs.Stream
 	lockPath string
 	// stateDir is the steward state directory (the approval channel's
 	// directory). It is the dir of lockPath, kept so Approve can materialize a
@@ -182,6 +183,11 @@ func Assemble(opts Options) (*App, error) {
 	}
 	rec := obs.NewRecorder(obs.Config{Driver: tool, Role: roleName, Secrets: deny}, sink)
 
+	// The live event stream: the SAME deny-list redacts every event payload,
+	// and the Recorder's Snapshot feeds the post-step metrics event. It is a
+	// second loop Observer, composed with the Recorder so the loop sees one.
+	stream := obs.NewStream(obs.NewRedactor(deny...), rec.Snapshot)
+
 	loopCfg := loop.Config{
 		MaxWorkers:    1,
 		DispatchState: opts.DispatchState,
@@ -195,7 +201,7 @@ func Assemble(opts Options) (*App, error) {
 			Policy:   guard.Policy{AllowReadWithinRoot: true},
 		},
 		Metrics:  rec,
-		Observer: rec,
+		Observer: obs.Composite{rec, stream},
 		Crash:    opts.Crash,
 		Now:      opts.Now,
 	}
@@ -212,6 +218,7 @@ func Assemble(opts Options) (*App, error) {
 		state:    st,
 		loop:     loop.New(src, disp, writer, st, loopCfg),
 		recorder: rec,
+		stream:   stream,
 		lockPath: filepath.Join(stateDir, lockFileName),
 		stateDir: stateDir,
 	}, nil
@@ -403,7 +410,26 @@ func (a *App) Approve(requestID, decision string) error {
 	default:
 		return fmt.Errorf("app: unknown decision %q (want approve|deny)", decision)
 	}
-	return approval.WriteResponse(a.stateDir, approval.Response{Key: requestID, Verdict: verdict})
+	if err := approval.WriteResponse(a.stateDir, approval.Response{Key: requestID, Verdict: verdict}); err != nil {
+		return err
+	}
+	if a.stream != nil {
+		a.stream.EmitApproval(requestID, decision)
+	}
+	return nil
+}
+
+// Subscribe registers a live event subscriber on the stream: ordered, redacted
+// notifications of the requested types (nil or empty = all), optionally
+// replaying buffered events with seq >= fromSeq. It returns the receive channel
+// and an idempotent cancel func. This is the protocol's events.subscribe seam;
+// the protocol owns the fan-out to the wire.
+func (a *App) Subscribe(types []string, fromSeq uint64) (<-chan obs.Event, func(), error) {
+	if a.stream == nil {
+		return nil, nil, errors.New("app: no event stream")
+	}
+	ch, cancel := a.stream.SubscribeFrom(types, fromSeq)
+	return ch, cancel, nil
 }
 
 // Close releases the EKA runtime. Idempotent.

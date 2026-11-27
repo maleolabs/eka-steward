@@ -15,6 +15,7 @@ import (
 
 	"github.com/maleolabs/eka-steward/v2/internal/app"
 	"github.com/maleolabs/eka-steward/v2/internal/loop"
+	"github.com/maleolabs/eka-steward/v2/internal/obs"
 )
 
 // fakeEngine is a store-free Engine for protocol tests. Every method is
@@ -29,6 +30,7 @@ type fakeEngine struct {
 	block   chan struct{} // when non-nil, Run waits on it or ctx.Done()
 	runs    int
 	approve []string
+	evCh    chan obs.Event // last subscription channel opened by Subscribe
 }
 
 func (e *fakeEngine) Plan(context.Context) ([]loop.Step, error) {
@@ -73,6 +75,33 @@ func (e *fakeEngine) Approve(requestID, decision string) error {
 }
 
 func (e *fakeEngine) Close() error { return nil }
+
+// Subscribe opens a fresh buffered channel per call; the test pushes events
+// with push and the returned cancel closes the channel (so the server's
+// forwarding goroutine exits, exactly like the real stream's cancel).
+func (e *fakeEngine) Subscribe(_ []string, _ uint64) (<-chan obs.Event, func(), error) {
+	ch := make(chan obs.Event, 8)
+	var once sync.Once
+	e.mu.Lock()
+	e.evCh = ch
+	e.mu.Unlock()
+	return ch, func() { once.Do(func() { close(ch) }) }, nil
+}
+
+// push sends one event to the most recent subscription channel.
+func (e *fakeEngine) push(ev obs.Event) {
+	e.mu.Lock()
+	ch := e.evCh
+	e.mu.Unlock()
+	ch <- ev
+}
+
+// hasSub reports whether a subscription channel has been opened.
+func (e *fakeEngine) hasSub() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.evCh != nil
+}
 
 func (e *fakeEngine) signalRan() {
 	e.mu.Lock()
@@ -449,6 +478,71 @@ func TestNotifyWritesNotificationLine(t *testing.T) {
 	}
 	_ = inW.Close()
 	<-done
+}
+
+// TestEventsSubscribeOverPipe drives events.subscribe -> steward/event
+// notifications -> events.unsubscribe over the stdio transport and proves the
+// notification lines interleave correctly with replies (one JSON object per
+// line, notifications carry no id).
+func TestEventsSubscribeOverPipe(t *testing.T) {
+	eng := &fakeEngine{}
+	c := newPipeClient(t, eng)
+	defer c.close()
+
+	c.send(initializeLine)
+	_ = c.recv()
+
+	c.send(`{"jsonrpc":"2.0","id":2,"method":"steward/events.subscribe","params":{"types":[],"fromSeq":0}}`)
+	sub := resultMap(t, c.recv())
+	if ok, _ := sub["subscribed"].(bool); !ok {
+		t.Fatalf("subscribe result = %v, want subscribed:true", sub)
+	}
+	subID, _ := sub["subscriptionId"].(string)
+	if subID == "" {
+		t.Fatalf("subscribe result has no subscriptionId: %v", sub)
+	}
+	waitFor(t, eng.hasSub)
+
+	eng.push(obs.Event{Seq: 1, Type: obs.EventStep, Data: obs.StepData{CandidateID: "p/sto:i-1"}})
+	eng.push(obs.Event{Seq: 2, Type: obs.EventWrite, Data: obs.WriteData{Line: "p/sto:i-1"}})
+
+	// Interleave a normal request with the pending notifications: read lines
+	// until both the plan reply and the two notifications have arrived, in any
+	// order. Every line must be valid JSON (no byte interleaving).
+	c.send(`{"jsonrpc":"2.0","id":3,"method":"steward/plan","params":{"project":"p"}}`)
+	var notifSeqs []uint64
+	gotPlan := false
+	deadline := time.Now().Add(2 * time.Second)
+	for len(notifSeqs) < 2 || !gotPlan {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out; notifications=%v planReply=%v", notifSeqs, gotPlan)
+		}
+		line := c.recv()
+		var m map[string]any
+		if err := json.Unmarshal(line, &m); err != nil {
+			t.Fatalf("line is not JSON: %v\n%s", err, line)
+		}
+		if method, _ := m["method"].(string); method == MethodEvent {
+			if _, hasID := m["id"]; hasID {
+				t.Fatal("event notification must carry no id")
+			}
+			params, _ := m["params"].(map[string]any)
+			seq, _ := params["seq"].(float64)
+			notifSeqs = append(notifSeqs, uint64(seq))
+			continue
+		}
+		if id, _ := m["id"].(float64); id == 3 {
+			gotPlan = true
+		}
+	}
+	if len(notifSeqs) != 2 || notifSeqs[0] != 1 || notifSeqs[1] != 2 {
+		t.Fatalf("notification seq = %v, want [1 2]", notifSeqs)
+	}
+
+	c.send(`{"jsonrpc":"2.0","id":4,"method":"steward/events.unsubscribe","params":{"subscriptionId":"` + subID + `"}}`)
+	if ok, _ := resultMap(t, c.recv())["unsubscribed"].(bool); !ok {
+		t.Fatal("unsubscribe result = false, want true")
+	}
 }
 
 // --- helpers ---

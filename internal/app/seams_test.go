@@ -3,8 +3,10 @@ package app
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/maleolabs/eka-steward/v2/internal/approval"
+	"github.com/maleolabs/eka-steward/v2/internal/obs"
 )
 
 // TestProtocolSeams exercises the thin protocol-facing methods on an assembled
@@ -85,5 +87,67 @@ func TestApproveWritesChannel(t *testing.T) {
 	}
 	if err := a.Approve("k", "maybe"); err == nil {
 		t.Fatal("Approve with unknown decision must fail")
+	}
+}
+
+// TestAppSubscribeEmitsStepEvents proves the assembled app exposes the loop's
+// step as ordered stream events (step, dispatch, metrics).
+func TestAppSubscribeEmitsStepEvents(t *testing.T) {
+	t.Setenv("EKA_HOME", t.TempDir())
+	a, err := Assemble(Options{
+		Project:    "p",
+		StateDir:   t.TempDir(),
+		Source:     fakeSource{ids: []string{"p/sto:a"}},
+		Dispatcher: &fakeDispatcher{},
+	})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	defer a.Close()
+
+	ch, cancel, err := a.Subscribe(nil, 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer cancel()
+
+	if _, ok, err := a.Step(context.Background()); err != nil || !ok {
+		t.Fatalf("Step = (ok=%v, err=%v), want one dispatched step", ok, err)
+	}
+
+	want := []string{obs.EventStep, obs.EventDispatch, obs.EventMetrics}
+	for i, typ := range want {
+		select {
+		case ev := <-ch:
+			if ev.Type != typ {
+				t.Fatalf("event %d type = %q, want %q", i, ev.Type, typ)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for event %d (%s)", i, typ)
+		}
+	}
+}
+
+// TestAppApproveEmitsApprovalEvent proves Approve emits one approval event on
+// the stream after it materializes the decision.
+func TestAppApproveEmitsApprovalEvent(t *testing.T) {
+	a := &App{stateDir: t.TempDir(), stream: obs.NewStream(nil, nil)}
+	ch, cancel := a.stream.Subscribe(nil)
+	defer cancel()
+
+	if err := a.Approve("req-key-1", "approve"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	select {
+	case ev := <-ch:
+		if ev.Type != obs.EventApproval {
+			t.Fatalf("event type = %q, want approval", ev.Type)
+		}
+		d, ok := ev.Data.(obs.ApprovalData)
+		if !ok || d.RequestID != "req-key-1" || d.Decision != "approve" {
+			t.Fatalf("approval data = %#v", ev.Data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the approval event")
 	}
 }
