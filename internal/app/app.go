@@ -83,6 +83,10 @@ type App struct {
 	loop     *loop.Loop
 	recorder *obs.Recorder
 	lockPath string
+	// stateDir is the steward state directory (the approval channel's
+	// directory). It is the dir of lockPath, kept so Approve can materialize a
+	// decision into the same file/queue channel the loop polls.
+	stateDir string
 }
 
 // Assemble wires the run seams from opts. It opens the EKA runtime, builds the
@@ -209,6 +213,7 @@ func Assemble(opts Options) (*App, error) {
 		loop:     loop.New(src, disp, writer, st, loopCfg),
 		recorder: rec,
 		lockPath: filepath.Join(stateDir, lockFileName),
+		stateDir: stateDir,
 	}, nil
 }
 
@@ -315,6 +320,91 @@ func (a *App) Report() obs.Report { return a.recorder.Report() }
 
 // WriteReport renders the run report to w (deterministic JSON, one line).
 func (a *App) WriteReport(w io.Writer) error { return a.Report().Write(w) }
+
+// Status is the deterministic instantaneous view a machine consumer reads: the
+// recorder's counters and the accumulated run report. Both are copies, so the
+// returned value is stable for the caller.
+type Status struct {
+	Snapshot obs.Snapshot
+	Report   obs.Report
+}
+
+// Status returns the current counters and report. It is safe to call
+// concurrently with a run in progress (the Recorder is mutex-guarded).
+func (a *App) Status() Status {
+	return Status{Snapshot: a.recorder.Snapshot(), Report: a.recorder.Report()}
+}
+
+// Plan is the thin protocol delegation to the owned loop's pure planning pass:
+// the deterministic step sequence from the current source set, skipping work
+// already recorded done. It never dispatches. See loop.Plan.
+func (a *App) Plan(ctx context.Context) ([]loop.Step, error) { return a.loop.Plan(ctx) }
+
+// Step is the thin protocol delegation to the owned loop's one-step call: it
+// plans and runs ONE checkpointed candidate, returning ok=false when nothing is
+// dispatchable. See loop.Step.
+func (a *App) Step(ctx context.Context) (loop.Step, bool, error) { return a.loop.Step(ctx) }
+
+// Cancel is the thin protocol delegation to the owned loop's batch cancel: it
+// cancels every in-flight dispatch of the run in progress. Idempotent and safe
+// to call concurrently with Run. See loop.Cancel.
+func (a *App) Cancel() { a.loop.Cancel() }
+
+// RunSteps acquires the single-instance lock and drives at most maxSteps
+// dispatch steps through the loop's public Resume/Step seams, then returns. A
+// non-positive maxSteps drives to quiescence exactly like Run (same lock, same
+// driver, same cleanup). A step-capped run is sequential — the bounded queue
+// does not apply — because the cap is a per-step count, not a queue window. A
+// cancelled ctx is a clean stop (nil), mirroring Run.
+func (a *App) RunSteps(ctx context.Context, maxSteps int) error {
+	if maxSteps <= 0 {
+		return a.Run(ctx)
+	}
+	lock, err := loop.Acquire(a.lockPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Release() }()
+
+	if err := a.loop.Resume(ctx); err != nil {
+		return err
+	}
+	for i := 0; i < maxSteps; i++ {
+		if ctx.Err() != nil {
+			return nil
+		}
+		_, ok, err := a.loop.Step(ctx)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return nil
+		}
+	}
+	return nil
+}
+
+// Approve materializes one human decision for the approval request with the
+// given deterministic request id (approval.RequestFor's Key) into the
+// file/queue channel the loop polls. It is the consumer side of the approver
+// seam: a pending escalation gate observes the response and its bounded wait
+// resolves. This never touches the EKA store — the loop records the decision
+// through the single write path.
+func (a *App) Approve(requestID, decision string) error {
+	if requestID == "" {
+		return errors.New("app: approve needs a request id")
+	}
+	var verdict approval.Verdict
+	switch decision {
+	case string(approval.Approve):
+		verdict = approval.Approve
+	case string(approval.Deny):
+		verdict = approval.Deny
+	default:
+		return fmt.Errorf("app: unknown decision %q (want approve|deny)", decision)
+	}
+	return approval.WriteResponse(a.stateDir, approval.Response{Key: requestID, Verdict: verdict})
+}
 
 // Close releases the EKA runtime. Idempotent.
 func (a *App) Close() error {

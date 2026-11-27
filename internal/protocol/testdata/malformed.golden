@@ -1,0 +1,4 @@
+# golden transcript: request line, then expected response line
+# init: false
+{not json
+{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error: invalid JSON"}}

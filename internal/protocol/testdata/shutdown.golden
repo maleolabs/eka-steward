@@ -1,0 +1,4 @@
+# golden transcript: request line, then expected response line
+# init: true
+{"jsonrpc":"2.0","id":9,"method":"steward/shutdown","params":{}}
+{"jsonrpc":"2.0","id":9,"result":{"stopping":true}}

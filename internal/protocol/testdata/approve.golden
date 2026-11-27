@@ -1,0 +1,4 @@
+# golden transcript: request line, then expected response line
+# init: true
+{"jsonrpc":"2.0","id":8,"method":"steward/approve","params":{"runId":"run-x","requestId":"req-1","decision":"approve"}}
+{"jsonrpc":"2.0","id":8,"result":{"requestId":"req-1","accepted":true}}

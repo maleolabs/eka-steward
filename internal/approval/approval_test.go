@@ -124,7 +124,7 @@ func TestAskBoundedErrorAndPanicAreDeny(t *testing.T) {
 func TestFileApproverApprove(t *testing.T) {
 	dir := t.TempDir()
 	req := escalatedRequest()
-	resp := response{Key: req.Key, Verdict: Approve, By: "operator"}
+	resp := Response{Key: req.Key, Verdict: Approve, By: "operator"}
 	b, _ := json.Marshal(resp)
 	if err := os.WriteFile(filepath.Join(dir, DefaultResponseFile), b, 0o644); err != nil {
 		t.Fatal(err)
@@ -147,7 +147,7 @@ func TestFileApproverDenyAfterDelay(t *testing.T) {
 	req := escalatedRequest()
 	go func() {
 		time.Sleep(40 * time.Millisecond)
-		b, _ := json.Marshal(response{Key: req.Key, Verdict: Deny, Reason: "nope"})
+		b, _ := json.Marshal(Response{Key: req.Key, Verdict: Deny, Reason: "nope"})
 		_ = os.WriteFile(filepath.Join(dir, DefaultResponseFile), b, 0o644)
 	}()
 
@@ -163,7 +163,7 @@ func TestFileApproverDenyAfterDelay(t *testing.T) {
 func TestFileApproverIgnoresMismatchedResponse(t *testing.T) {
 	dir := t.TempDir()
 	req := escalatedRequest()
-	b, _ := json.Marshal(response{Key: "some-other-key", Verdict: Approve})
+	b, _ := json.Marshal(Response{Key: "some-other-key", Verdict: Approve})
 	if err := os.WriteFile(filepath.Join(dir, DefaultResponseFile), b, 0o644); err != nil {
 		t.Fatal(err)
 	}

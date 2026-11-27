@@ -1,0 +1,4 @@
+# golden transcript: request line, then expected response line
+# init: true
+{"jsonrpc":"2.0","id":3,"method":"steward/step","params":{"runId":"run-x"}}
+{"jsonrpc":"2.0","id":3,"result":{"step":{"candidateId":"p/sto:a","kind":"dispatch","priority":0,"state":"planned","createdSeq":1}}}

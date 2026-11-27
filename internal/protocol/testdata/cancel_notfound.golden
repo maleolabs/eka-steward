@@ -1,0 +1,4 @@
+# golden transcript: request line, then expected response line
+# init: true
+{"jsonrpc":"2.0","id":7,"method":"steward/cancel","params":{"runId":"nope"}}
+{"jsonrpc":"2.0","id":7,"error":{"code":-32003,"message":"unknown run: nope"}}

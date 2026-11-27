@@ -1,0 +1,4 @@
+# golden transcript: request line, then expected response line
+# init: false
+{"jsonrpc":"2.0","id":1,"method":"steward/initialize","params":{"protocolVersions":["9"]}}
+{"jsonrpc":"2.0","id":1,"error":{"code":-32002,"message":"no supported protocol version offered (supported: 1)"}}

@@ -1,0 +1,4 @@
+# golden transcript: request line, then expected response line
+# init: true
+{"jsonrpc":"2.0","id":5,"method":"steward/resume","params":{"runId":"nope"}}
+{"jsonrpc":"2.0","id":5,"error":{"code":-32003,"message":"unknown run: nope"}}
