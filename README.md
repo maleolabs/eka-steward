@@ -63,6 +63,7 @@ docs/boundary.md         the two hard boundary rules (api-only, one escape hatch
 docs/control-loop.md     control loop: seams, pure Plan vs Step, lock, cgroup, state
 docs/backpressure.md     bounded worker pool: sizing-bounded concurrency, deterministic overflow, metrics
 docs/checkpoint.md       crash-safe checkpoint/resume: intent log, reconcile, crash matrix
+docs/recovery.md         bounded retry, cancel semantics, failure -> no partial write
 docs/determinism.md      code decides which/when/if, the LLM decides what
 docs/drivers.md          driver registry: config, adapters, probing (never writes EKA)
 docs/guardrails.md       worker containment: four layers, VCS-isolation-not-a-boundary, residual risks
@@ -199,6 +200,24 @@ sequential loop; `MaxWorkers == 1` stays byte-identical to the golden plan
 sequence. The model, the exact overflow rule, the metrics seam and the
 bounded-resource guarantees are in
 [`docs/backpressure.md`](docs/backpressure.md).
+
+## Recovery: retry, cancel & no partial write
+
+`internal/loop` bounds what happens when a dispatch **fails**, **times out** or
+is **cancelled**, and guarantees a failed worker leaves **no partial EKA
+write**. A `RetryPolicy` (`MaxAttempts` = total attempts, so `1` means *no
+retry*; a deterministic, jitter-free `Backoff` on an injectable clock) is
+driven **by the loop, not the pool**, so each attempt is its own write-ahead
+transaction: the intent is rolled back the moment an attempt fails and the
+candidate is left un-`Done` (deferred, never dropped) after exhaustion.
+`Config.AttemptTimeout` makes a hung worker a **retryable** timeout, bounded by
+`MaxAttempts`. `Loop.Cancel()` cancels the **current batch** — every in-flight
+worker's context is cancelled, its intent rolled back (no write), its candidate
+left un-`Done`, and `Run` returns `nil` (a clean, deterministic stop); `Cancel`
+is idempotent. Retries and cancellations are reported through the `pool.Metrics`
+seam (`Retries`, `Cancellations`). The policy, the attempt-per-transaction
+protocol, the cancel semantics, the failure→no-partial-write table and where
+each property is enforced are in [`docs/recovery.md`](docs/recovery.md).
 
 ## Context payload
 

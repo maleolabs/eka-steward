@@ -127,9 +127,11 @@ This is the seam only: the pool builds no logging, no exporter and no dashboard.
 
 **Best-effort / out of scope:**
 
-- **`Run` cancellation** stops pulling new jobs; tasks already running finish.
-- **Retry / cancel policy** is a separate work item (`sto:cancel-retry-recovery`);
-  the pool only runs what it is given and surfaces the first task error.
+- The pool **only runs what it is given** and surfaces the first task error; it
+  holds no retry or cancel policy of its own. Bounded retry, per-attempt
+  timeout and `Loop.Cancel` are the control loop's
+  ([`recovery.md`](recovery.md)), and the loop's `Retries` / `Cancellations`
+  counters ride the same `pool.Metrics` seam.
 
 ## 6. Backward compatibility
 

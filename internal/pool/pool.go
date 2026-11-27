@@ -38,12 +38,19 @@ var ErrQueueFull = errors.New("pool: queue full")
 // to the extent the caller serializes shared state itself.
 type Task func(ctx context.Context) error
 
-// Metrics is the pool's minimal saturation seam. It is intentionally a small
-// interface of plain int setters — no metrics stack, no labels, no timers —
-// so the observability work item can adapt it to whatever backend it builds
-// without the pool taking a dependency. Every method receives the current
-// value; implementations must be safe for concurrent use because the pool
-// calls them from its worker goroutines.
+// Metrics is the minimal control-plane observability seam shared by the pool
+// and the control loop (internal/loop). It is intentionally a small interface
+// of plain int setters — no metrics stack, no labels, no timers — so the
+// observability work item can adapt it to whatever backend it builds without
+// either package taking a dependency. Every method receives the current value;
+// implementations must be safe for concurrent use because the callers invoke
+// them from their worker goroutines and, for the retry/cancel counters, off the
+// loop goroutine.
+//
+// The pool itself only calls the saturation methods (QueueDepth, InFlight,
+// Dispatched, Rejected, PeakInFlight). The loop reports its bounded-retry and
+// cancel counts (Retries, Cancellations) through the same injected seam
+// (loop.Config.Metrics), so one recorder keeps the whole picture.
 type Metrics interface {
 	// QueueDepth is the CURRENT number of submitted-but-not-yet-started jobs.
 	QueueDepth(n int)
@@ -56,17 +63,26 @@ type Metrics interface {
 	Rejected(n int)
 	// PeakInFlight is the highest InFlight value observed so far.
 	PeakInFlight(n int)
+	// Retries is the CUMULATIVE number of dispatch retries the control loop
+	// attempted (a re-dispatch after a failed attempt). The pool never
+	// retries; the loop reports its bounded retry policy here.
+	Retries(n int)
+	// Cancellations is the CUMULATIVE number of cancel signals the control
+	// loop delivered while a batch was active (loop.Loop.Cancel).
+	Cancellations(n int)
 }
 
 // NopMetrics discards every observation. It is the default when no recorder is
 // wired, so the pool never needs a nil check on its hot path.
 type NopMetrics struct{}
 
-func (NopMetrics) QueueDepth(int)   {}
-func (NopMetrics) InFlight(int)     {}
-func (NopMetrics) Dispatched(int)   {}
-func (NopMetrics) Rejected(int)     {}
-func (NopMetrics) PeakInFlight(int) {}
+func (NopMetrics) QueueDepth(int)    {}
+func (NopMetrics) InFlight(int)      {}
+func (NopMetrics) Dispatched(int)    {}
+func (NopMetrics) Rejected(int)      {}
+func (NopMetrics) PeakInFlight(int)  {}
+func (NopMetrics) Retries(int)       {}
+func (NopMetrics) Cancellations(int) {}
 
 // Snapshot is an instantaneous reading of a Recorder.
 type Snapshot struct {
@@ -76,6 +92,8 @@ type Snapshot struct {
 	Dispatched     int
 	Rejected       int
 	PeakInFlight   int
+	Retries        int
+	Cancellations  int
 }
 
 // Recorder is an in-memory Metrics for tests and for a caller that wants to
@@ -102,6 +120,9 @@ func (r *Recorder) QueueDepth(n int) {
 func (r *Recorder) InFlight(n int)   { r.record(func(s *Snapshot) { s.InFlight = n }) }
 func (r *Recorder) Dispatched(n int) { r.record(func(s *Snapshot) { s.Dispatched = n }) }
 func (r *Recorder) Rejected(n int)   { r.record(func(s *Snapshot) { s.Rejected = n }) }
+
+func (r *Recorder) Retries(n int)       { r.record(func(s *Snapshot) { s.Retries = n }) }
+func (r *Recorder) Cancellations(n int) { r.record(func(s *Snapshot) { s.Cancellations = n }) }
 
 func (r *Recorder) PeakInFlight(n int) {
 	r.record(func(s *Snapshot) {

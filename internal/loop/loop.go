@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/maleolabs/eka-steward/v2/internal/decision"
 	"github.com/maleolabs/eka-steward/v2/internal/pool"
@@ -129,9 +130,24 @@ type Config struct {
 	// unchanged sequential path — one step at a time, byte-identical to the
 	// pre-pool loop.
 	QueueLimit int
-	// Metrics is the pool saturation seam (internal/pool.Metrics). nil uses a
-	// no-op default. It is only consulted on the pooled path.
+	// Metrics is the control-plane observability seam (internal/pool.Metrics):
+	// on the pooled path the pool reports saturation through it, and on every
+	// path the loop reports its bounded-retry and cancel counters (Retries,
+	// Cancellations). nil uses a no-op default.
 	Metrics pool.Metrics
+	// Retry bounds the loop's re-dispatch of one candidate (docs/recovery.md).
+	// The zero value ({0,0}) clamps to MaxAttempts 1: no retry, exactly the
+	// pre-retry loop.
+	Retry RetryPolicy
+	// AttemptTimeout, when > 0, bounds each dispatch attempt with
+	// context.WithTimeout: a timed-out attempt is a retryable failure. 0 means
+	// no per-attempt deadline (the attempt is bounded only by the caller ctx).
+	AttemptTimeout time.Duration
+	// Sleep is the injectable backoff-delay seam: the loop calls it between
+	// retry attempts. nil uses time.Sleep (production). A test injects a
+	// recorder that returns immediately, so a retry run never waits on the
+	// wall clock while still asserting the exact delay sequence.
+	Sleep func(time.Duration)
 }
 
 // Loop is the deterministic control loop. Construct it with New. The sequential
@@ -154,6 +170,17 @@ type Loop struct {
 	// writeMu serializes Writer mutations so the single EKA write path is
 	// never entered concurrently by two workers.
 	writeMu sync.Mutex
+
+	// cancelMu guards batchCancel, the cancel func of the Run in progress.
+	// Cancel reads it to cancel the current batch deterministically.
+	cancelMu    sync.Mutex
+	batchCancel context.CancelFunc
+
+	// metricMu guards the loop's own cumulative retry/cancel counters, which
+	// are reported to the Config.Metrics seam (pooled path: concurrent).
+	metricMu sync.Mutex
+	retries  int
+	cancels  int
 }
 
 // New wires a Loop from its seams. state must be non-nil: the loop records
@@ -218,14 +245,22 @@ func (l *Loop) Step(ctx context.Context) (Step, bool, error) {
 // path). It serializes every Store mutation (stateMu) and every Writer
 // mutation (writeMu) but never the dispatch, so workers overlap on the LLM
 // seam while the checkpoint stays consistent.
+//
+// The dispatch is retried at most Config.Retry.MaxAttempts times
+// (docs/recovery.md). Each attempt is its own write-ahead transaction: the
+// intent is persisted before the attempt and rolled back the moment the
+// attempt fails, so an in-flight intent only ever covers the attempt currently
+// running and a failed candidate leaves NO partial EKA write behind. After
+// MaxAttempts exhausted attempts the candidate is left un-Done (deferred, never
+// dropped) and a deterministic outcome is recorded.
 func (l *Loop) stepOne(ctx context.Context, c decision.Candidate) (Step, error) {
 	step := stepFor(c)
 
 	// No write path configured: the run is plan/dispatch only and carries no
 	// checkpoint, so there is nothing to reconcile on resume.
 	if l.writer == nil || l.cfg.DispatchState == "" {
-		if _, err := l.dispatcher.Dispatch(ctx, c); err != nil {
-			return step, fmt.Errorf("loop: dispatch %s: %w", c.ID, err)
+		if err := l.dispatchWithRetry(ctx, c, nil, nil); err != nil {
+			return step, err
 		}
 		if err := l.markDone(c.ID); err != nil {
 			return step, err
@@ -241,18 +276,14 @@ func (l *Loop) stepOne(ctx context.Context, c decision.Candidate) (Step, error) 
 		To:          l.cfg.DispatchState,
 		Step:        step,
 	}
-	// Write-ahead: persist the intent BEFORE the worker runs.
-	if err := l.beginIntent(in); err != nil {
-		return step, err
-	}
-	l.crash(BoundaryAfterIntent)
+	begin := func() error { return l.beginIntent(in) }
+	rollback := func() error { return l.rollbackIntent(c.ID) }
 
-	if _, err := l.dispatcher.Dispatch(ctx, c); err != nil {
-		// A normal dispatch failure (not a crash) is rolled back so the item
-		// is re-dispatched on the next run; only a crash leaves the intent for
-		// resume to reconcile.
-		_ = l.rollbackIntent(c.ID)
-		return step, fmt.Errorf("loop: dispatch %s: %w", c.ID, err)
+	// Write-ahead: persist the intent BEFORE each attempt and roll it back on
+	// failure, so a normal dispatch (or timeout) failure leaves no intent and
+	// no partial write; only a crash leaves the intent for resume.
+	if err := l.dispatchWithRetry(ctx, c, begin, rollback); err != nil {
+		return step, err
 	}
 	l.crash(BoundaryAfterDispatch)
 
@@ -266,6 +297,110 @@ func (l *Loop) stepOne(ctx context.Context, c decision.Candidate) (Step, error) 
 	}
 	l.observe(step)
 	return step, nil
+}
+
+// dispatchWithRetry runs the bounded, deterministic dispatch retry loop for one
+// candidate. For each attempt it calls begin (persisting the write-ahead
+// intent; nil when there is no write path), runs the worker under the
+// per-attempt timeout, and on success returns nil with the intent left in
+// flight for the caller to apply and complete. On failure it rolls the failed
+// attempt's intent back via rollback (nil when there is no write path) and
+// retries until MaxAttempts is reached or the context is cancelled.
+//
+// Cancellation (the caller's ctx, or Loop.Cancel) is never retried: the loop
+// stops, the attempt's intent is already rolled back, and the candidate stays
+// un-Done. A retry is reported to the Metrics seam exactly once per
+// re-dispatch, so the count is deterministic: MaxAttempts attempts yield
+// MaxAttempts-1 retries when every attempt fails.
+func (l *Loop) dispatchWithRetry(ctx context.Context, c decision.Candidate, begin, rollback func() error) error {
+	max := l.cfg.Retry.MaxAttempts
+	if max < 1 {
+		max = 1
+	}
+	var lastErr error
+	for attempt := 1; attempt <= max; attempt++ {
+		if begin != nil {
+			if err := begin(); err != nil {
+				return err
+			}
+			l.crash(BoundaryAfterIntent)
+		}
+
+		lastErr = l.dispatch(ctx, c)
+		if lastErr == nil {
+			return nil
+		}
+		if rollback != nil {
+			_ = rollback()
+		}
+
+		// Stop without recording a retry when this was the last allowed
+		// attempt or the context has been cancelled.
+		if attempt == max || ctx.Err() != nil {
+			break
+		}
+		l.recordRetry()
+		l.sleep(l.cfg.Retry.Backoff)
+	}
+	return lastErr
+}
+
+// dispatch runs ONE dispatch attempt, bounded by Config.AttemptTimeout when it
+// is set. A timeout surfaces as a context.DeadlineExceeded error, which the
+// retry loop treats as a retryable failure.
+func (l *Loop) dispatch(ctx context.Context, c decision.Candidate) error {
+	attemptCtx := ctx
+	if l.cfg.AttemptTimeout > 0 {
+		var cancel context.CancelFunc
+		attemptCtx, cancel = context.WithTimeout(ctx, l.cfg.AttemptTimeout)
+		defer cancel()
+	}
+	if _, err := l.dispatcher.Dispatch(attemptCtx, c); err != nil {
+		return fmt.Errorf("loop: dispatch %s: %w", c.ID, err)
+	}
+	return nil
+}
+
+// sleep waits for the deterministic backoff delay between retry attempts. A
+// non-positive delay and the injected test seam both return immediately.
+func (l *Loop) sleep(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	if l.cfg.Sleep != nil {
+		l.cfg.Sleep(d)
+		return
+	}
+	time.Sleep(d)
+}
+
+// recordRetry increments the cumulative retry counter and reports it to the
+// Metrics seam.
+func (l *Loop) recordRetry() {
+	l.metricMu.Lock()
+	l.retries++
+	n := l.retries
+	l.metricMu.Unlock()
+	l.metrics().Retries(n)
+}
+
+// recordCancellation increments the cumulative cancel counter and reports it to
+// the Metrics seam.
+func (l *Loop) recordCancellation() {
+	l.metricMu.Lock()
+	l.cancels++
+	n := l.cancels
+	l.metricMu.Unlock()
+	l.metrics().Cancellations(n)
+}
+
+// metrics returns the observability seam, defaulting to a no-op so the loop
+// never needs a nil check on its path.
+func (l *Loop) metrics() pool.Metrics {
+	if l.cfg.Metrics == nil {
+		return pool.NopMetrics{}
+	}
+	return l.cfg.Metrics
 }
 
 // advance applies the step's mutation through the Writer under writeMu, so the
@@ -310,8 +445,14 @@ func (l *Loop) Resume(ctx context.Context) error {
 }
 
 // Run reconciles any in-flight intent (resume) and then drives the loop until
-// nothing is dispatchable or ctx is cancelled, returning nil (nothing left) or
-// the cancellation error.
+// nothing is dispatchable or the batch is cancelled, returning nil (nothing
+// left, or a clean cancel) or the error.
+//
+// Run installs a cancellable batch context; Loop.Cancel cancels it, which
+// cancels every in-flight dispatch in this Run. A cancelled batch is a clean,
+// deterministic stop: each in-flight worker returns, its intent is rolled back
+// (no EKA write) and its candidate is left un-Done, so Run returns nil and the
+// next Run re-selects the same candidates (docs/recovery.md).
 //
 // With the default QueueLimit == 0 the loop is sequential: Run drives Step
 // until nothing is dispatchable, and for a fixed Source/Dispatcher/state an
@@ -325,13 +466,66 @@ func (l *Loop) Resume(ctx context.Context) error {
 // deterministic overflow rule in docs/backpressure.md, never a nondeterministic
 // drop. The caller drives repeated Runs to quiescence.
 func (l *Loop) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	l.setBatch(cancel)
+	defer func() {
+		l.clearBatch()
+		cancel()
+	}()
+
 	if err := l.Resume(ctx); err != nil {
-		return err
+		return l.dispatchErr(ctx, err)
 	}
+	var err error
 	if l.cfg.QueueLimit > 0 {
-		return l.runPooled(ctx)
+		err = l.runPooled(ctx)
+	} else {
+		err = l.runSequential(ctx)
 	}
-	return l.runSequential(ctx)
+	return l.dispatchErr(ctx, err)
+}
+
+// dispatchErr maps a run outcome to Run's return value. A cancelled batch (the
+// caller's ctx or Loop.Cancel) is a clean, deterministic stop — the in-flight
+// intents were rolled back and the candidates stay un-Done — so Run returns
+// nil. Any other error is returned unchanged.
+func (l *Loop) dispatchErr(ctx context.Context, err error) error {
+	if err != nil && ctx.Err() != nil {
+		return nil
+	}
+	return err
+}
+
+// setBatch records the cancel func of the Run in progress.
+func (l *Loop) setBatch(c context.CancelFunc) {
+	l.cancelMu.Lock()
+	l.batchCancel = c
+	l.cancelMu.Unlock()
+}
+
+// clearBatch drops the recorded batch cancel func.
+func (l *Loop) clearBatch() {
+	l.cancelMu.Lock()
+	l.batchCancel = nil
+	l.cancelMu.Unlock()
+}
+
+// Cancel cancels the current batch: every in-flight dispatch of the Run in
+// progress has its context cancelled. Each cancelled worker's intent is rolled
+// back (no EKA write) and its candidate is left un-Done, so it is re-selected
+// by the next Run; Run itself returns nil (a clean cancel, not an error).
+// Cancel is idempotent, safe to call concurrently with Run, and a no-op when no
+// batch is active. A standalone Step caller cancels through its own context
+// instead. See docs/recovery.md.
+func (l *Loop) Cancel() {
+	l.cancelMu.Lock()
+	c := l.batchCancel
+	l.cancelMu.Unlock()
+	if c == nil {
+		return
+	}
+	c()
+	l.recordCancellation()
 }
 
 // runSequential is the original single-threaded driver: Step until nothing is

@@ -142,7 +142,9 @@ and a real temp store, `TestResumeTransitionReconcileExactlyOnce` /
   write path to get the guarantee.
 - **A normal dispatch error rolls the intent back** (the item is retried); only
   a crash leaves the intent for resume to reconcile. A persistent write error
-  keeps the intent in flight and the next run retries the reconcile.
+  keeps the intent in flight and the next run retries the reconcile. Bounded
+  retry (`MaxAttempts`/`Backoff`), the per-attempt timeout and `Loop.Cancel` are
+  specified in [`recovery.md`](recovery.md).
 - **Forward `publish` dispatch is not emitted by this cut.** The loop's forward
   mutation today is the `transition`; the `publish` intent kind is fully wired
   through `ekawrite.Reconcile` and tested store-backed, ready for a later

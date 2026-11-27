@@ -77,7 +77,9 @@ testable:
   (`docs/backpressure.md`) and the caller drives repeated `Run`s to quiescence.
 
 Crash-recovery, the intent log, the checkpoint location and the crash matrix
-live in [`checkpoint.md`](checkpoint.md).
+live in [`checkpoint.md`](checkpoint.md). Bounded retry, the per-attempt
+timeout, `Loop.Cancel` and the failure→no-partial-write guarantees live in
+[`recovery.md`](recovery.md).
 
 `Step` is JSON-able so the exact sequence for a fixture is frozen in
 `internal/loop/testdata/steps.golden`:
