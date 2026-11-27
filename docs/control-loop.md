@@ -24,9 +24,11 @@ Run      → Resume, then Step until nothing is dispatchable
 Release(lock)
 ```
 
-A loop is sequential by design. Concurrency, backpressure admission and a
-real worker pool are a separate work item; this package runs one step at a
-time.
+The default loop is sequential: `Run` drives one `Step` at a time. When
+`Config.QueueLimit > 0` it instead runs through the bounded worker pool
+(`internal/pool`): up to `sizing.Workers(...)` steps run concurrently, the queue
+is bounded, and admission overflow is deterministic. See
+[`backpressure.md`](backpressure.md).
 
 ## Seams
 
@@ -69,8 +71,10 @@ testable:
 - `Resume(ctx)` reconciles every in-flight intent left by a previous run
   **without dispatching** (idempotent: a transition at/after its target and a
   replay of an identical publish are no-ops), then clears it.
-- `Run(ctx)` runs `Resume`, then drives `Step` until nothing is left or `ctx`
-  is cancelled.
+- `Run(ctx)` runs `Resume`, then drives the loop to a stop. Sequentially (the
+  default, `QueueLimit == 0`) it runs `Step` until nothing is left; with
+  `QueueLimit > 0` it admits one bounded batch through the worker pool
+  (`docs/backpressure.md`) and the caller drives repeated `Run`s to quiescence.
 
 Crash-recovery, the intent log, the checkpoint location and the crash matrix
 live in [`checkpoint.md`](checkpoint.md).

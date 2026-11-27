@@ -52,6 +52,7 @@ cmd/                     Cobra command tree (the only production package)
 internal/escapehatch/    the one audited subprocess adapter (allow-list)
 internal/decision/      pure, deterministic selection/order kernel (stdlib only)
 internal/loop/          deterministic control loop (Plan/Step/Run, lock, cgroup sizing, resume state)
+internal/pool/          bounded worker pool: concurrency + deterministic backpressure (no EKA)
 internal/driver/        deterministic driver registry (parse/resolve/select + probe seam)
 internal/role/          steward worker-role config (parse + resolve; no EKA)
 internal/sizing/        pure worker-count sizing (no I/O, no LLM)
@@ -59,6 +60,7 @@ internal/render/        pure, bounded context-payload renderer (stdlib only)
 docs/adr/                architecture decision records
 docs/boundary.md         the two hard boundary rules (api-only, one escape hatch)
 docs/control-loop.md     control loop: seams, pure Plan vs Step, lock, cgroup, state
+docs/backpressure.md     bounded worker pool: sizing-bounded concurrency, deterministic overflow, metrics
 docs/checkpoint.md       crash-safe checkpoint/resume: intent log, reconcile, crash matrix
 docs/determinism.md      code decides which/when/if, the LLM decides what
 docs/drivers.md          driver registry: config, adapters, probing (never writes EKA)
@@ -178,6 +180,23 @@ gate), so no EKA write is applied twice and completed work is not
 re-dispatched. The checkpoint location, the intent protocol, the reconcile
 rules per write class and the crash matrix are in
 [`docs/checkpoint.md`](docs/checkpoint.md).
+
+## Backpressure
+
+With `Config.QueueLimit > 0` the loop runs through a **bounded worker pool**
+(`internal/pool`): `Run` admits at most `QueueLimit` candidates in the pinned
+`internal/decision` order and drains them with up to `sizing.Workers(...)`
+workers. Concurrency is bounded by the sizing policy, the queue is bounded, and
+a candidate past the limit is refused with `pool.ErrQueueFull` — a
+**deterministic** overflow (the deterministic accepted set is a pure function of
+the candidates, `QueueLimit` and the persisted state), never a nondeterministic
+drop: refused candidates stay undone and are re-selected by the next `Run`.
+Saturation (queue depth, in-flight, dispatcher, rejections, peak) is exposed
+through the minimal `pool.Metrics` seam. `QueueLimit == 0` keeps the unchanged
+sequential loop; `MaxWorkers == 1` stays byte-identical to the golden plan
+sequence. The model, the exact overflow rule, the metrics seam and the
+bounded-resource guarantees are in
+[`docs/backpressure.md`](docs/backpressure.md).
 
 ## Context payload
 

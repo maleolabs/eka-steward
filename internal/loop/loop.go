@@ -29,9 +29,12 @@ package loop
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/maleolabs/eka-steward/v2/internal/decision"
+	"github.com/maleolabs/eka-steward/v2/internal/pool"
 	"github.com/maleolabs/eka-steward/v2/internal/sizing"
 )
 
@@ -111,21 +114,46 @@ type Config struct {
 	// Apply) to simulate a kill deterministically.
 	Crash CrashPoint
 	// OnStep, when set, observes every step the loop completes — both a
-	// forward dispatch and a resume reconcile — exactly once, in the
-	// deterministic order. It is an observability seam; it never feeds a
-	// control decision.
+	// forward dispatch and a resume reconcile — exactly once. In the
+	// sequential path (QueueLimit == 0) the order is the deterministic plan
+	// order; in the pooled path (QueueLimit > 0) OnStep fires from worker
+	// goroutines, so its order is the completion order and the callback must
+	// be safe for concurrent use. It is an observability seam; it never feeds
+	// a control decision.
 	OnStep func(Step)
+	// QueueLimit, when > 0, enables the bounded worker pool (internal/pool):
+	// Run admits at most QueueLimit candidates in the deterministic
+	// decision.Order and drains them with up to sizing.Workers members, and a
+	// further candidate is refused with pool.ErrQueueFull (the deterministic
+	// overflow rule, docs/backpressure.md). 0 (the default) keeps the
+	// unchanged sequential path — one step at a time, byte-identical to the
+	// pre-pool loop.
+	QueueLimit int
+	// Metrics is the pool saturation seam (internal/pool.Metrics). nil uses a
+	// no-op default. It is only consulted on the pooled path.
+	Metrics pool.Metrics
 }
 
-// Loop is the deterministic control loop. Construct it with New; it is not
-// safe for concurrent use (the run is sequential by design — concurrency and
-// backpressure are a separate work item).
+// Loop is the deterministic control loop. Construct it with New. The sequential
+// path (QueueLimit == 0) is single-threaded. The pooled path (QueueLimit > 0)
+// may run several steps concurrently; it serializes every Store mutation and
+// every Writer mutation internally, so a single Loop is safe for one Run at a
+// time.
 type Loop struct {
 	source     Source
 	dispatcher Dispatcher
 	writer     Writer
 	state      *Store
 	cfg        Config
+
+	// stateMu serializes every access to the persisted Store so concurrent
+	// pool workers can never interleave a Load/modify/Save and lose an intent
+	// or a Done entry (docs/backpressure.md). It is held only around Store
+	// work, never around a dispatch.
+	stateMu sync.Mutex
+	// writeMu serializes Writer mutations so the single EKA write path is
+	// never entered concurrently by two workers.
+	writeMu sync.Mutex
 }
 
 // New wires a Loop from its seams. state must be non-nil: the loop records
@@ -177,19 +205,33 @@ func (l *Loop) Step(ctx context.Context) (Step, bool, error) {
 	if !ok {
 		return Step{}, false, nil
 	}
+	step, err := l.stepOne(ctx, c)
+	if err != nil {
+		return step, true, err
+	}
+	return step, true, nil
+}
+
+// stepOne runs the checkpointed transaction for one already-selected
+// candidate: intent → dispatch → apply → done. Step selects the candidate (in
+// the sequential path) and the pool workers call it directly (in the pooled
+// path). It serializes every Store mutation (stateMu) and every Writer
+// mutation (writeMu) but never the dispatch, so workers overlap on the LLM
+// seam while the checkpoint stays consistent.
+func (l *Loop) stepOne(ctx context.Context, c decision.Candidate) (Step, error) {
 	step := stepFor(c)
 
 	// No write path configured: the run is plan/dispatch only and carries no
 	// checkpoint, so there is nothing to reconcile on resume.
 	if l.writer == nil || l.cfg.DispatchState == "" {
 		if _, err := l.dispatcher.Dispatch(ctx, c); err != nil {
-			return step, true, fmt.Errorf("loop: dispatch %s: %w", c.ID, err)
+			return step, fmt.Errorf("loop: dispatch %s: %w", c.ID, err)
 		}
 		if err := l.markDone(c.ID); err != nil {
-			return step, true, err
+			return step, err
 		}
 		l.observe(step)
-		return step, true, nil
+		return step, nil
 	}
 
 	in := Intent{
@@ -201,7 +243,7 @@ func (l *Loop) Step(ctx context.Context) (Step, bool, error) {
 	}
 	// Write-ahead: persist the intent BEFORE the worker runs.
 	if err := l.beginIntent(in); err != nil {
-		return step, true, err
+		return step, err
 	}
 	l.crash(BoundaryAfterIntent)
 
@@ -210,20 +252,28 @@ func (l *Loop) Step(ctx context.Context) (Step, bool, error) {
 		// is re-dispatched on the next run; only a crash leaves the intent for
 		// resume to reconcile.
 		_ = l.rollbackIntent(c.ID)
-		return step, true, fmt.Errorf("loop: dispatch %s: %w", c.ID, err)
+		return step, fmt.Errorf("loop: dispatch %s: %w", c.ID, err)
 	}
 	l.crash(BoundaryAfterDispatch)
 
-	if err := l.writer.Advance(ctx, c, l.cfg.DispatchState); err != nil {
-		return step, true, fmt.Errorf("loop: record %s: %w", c.ID, err)
+	if err := l.advance(ctx, c); err != nil {
+		return step, fmt.Errorf("loop: record %s: %w", c.ID, err)
 	}
 	l.crash(BoundaryAfterApply)
 
 	if err := l.completeIntent(c.ID); err != nil {
-		return step, true, err
+		return step, err
 	}
 	l.observe(step)
-	return step, true, nil
+	return step, nil
+}
+
+// advance applies the step's mutation through the Writer under writeMu, so the
+// single EKA write path is never entered concurrently.
+func (l *Loop) advance(ctx context.Context, c decision.Candidate) error {
+	l.writeMu.Lock()
+	defer l.writeMu.Unlock()
+	return l.writer.Advance(ctx, c, l.cfg.DispatchState)
 }
 
 // Resume reconciles every in-flight intent persisted by a previous run BEFORE
@@ -259,15 +309,34 @@ func (l *Loop) Resume(ctx context.Context) error {
 	return nil
 }
 
-// Run reconciles any in-flight intent (resume) and then drives Step until
+// Run reconciles any in-flight intent (resume) and then drives the loop until
 // nothing is dispatchable or ctx is cancelled, returning nil (nothing left) or
-// the cancellation error. The sequence is deterministic for a fixed
-// Source/Dispatcher/state: an uninterrupted run and a crash-then-resume run
-// emit a byte-identical step sequence (docs/checkpoint.md).
+// the cancellation error.
+//
+// With the default QueueLimit == 0 the loop is sequential: Run drives Step
+// until nothing is dispatchable, and for a fixed Source/Dispatcher/state an
+// uninterrupted run and a crash-then-resume run emit a byte-identical step
+// sequence (docs/checkpoint.md).
+//
+// With QueueLimit > 0 Run uses the bounded worker pool: it admits at most
+// QueueLimit candidates in the deterministic decision.Order, drains them with
+// up to sizing.Workers members, and returns when that batch is drained. A
+// candidate past the queue limit is left undone for the next Run — the
+// deterministic overflow rule in docs/backpressure.md, never a nondeterministic
+// drop. The caller drives repeated Runs to quiescence.
 func (l *Loop) Run(ctx context.Context) error {
 	if err := l.Resume(ctx); err != nil {
 		return err
 	}
+	if l.cfg.QueueLimit > 0 {
+		return l.runPooled(ctx)
+	}
+	return l.runSequential(ctx)
+}
+
+// runSequential is the original single-threaded driver: Step until nothing is
+// dispatchable.
+func (l *Loop) runSequential(ctx context.Context) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -280,6 +349,57 @@ func (l *Loop) Run(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+// runPooled drives one admission window through the bounded worker pool. It
+// selects the dispatchable candidates, orders them with the pinned decision
+// order, and Submits them in that order: the first QueueLimit are admitted and
+// the rest are refused with pool.ErrQueueFull, at which point the loop stops
+// planning and drains (docs/backpressure.md). The accepted set is therefore a
+// pure function of the candidate set, QueueLimit and the persisted state.
+func (l *Loop) runPooled(ctx context.Context) error {
+	cs, err := l.selectable(ctx)
+	if err != nil {
+		return err
+	}
+	var dispatchable []decision.Candidate
+	for _, c := range decision.Order(cs) {
+		if ready(c) {
+			dispatchable = append(dispatchable, c)
+		}
+	}
+	if len(dispatchable) == 0 {
+		return nil
+	}
+
+	// MaxWorkers comes from the sizing policy, never from a raw config value:
+	// the pool can never run more workers than internal/sizing chose.
+	workers, err := l.Workers()
+	if err != nil {
+		return err
+	}
+	p := pool.NewPool(workers, l.cfg.QueueLimit, l.cfg.Metrics)
+
+	for _, cand := range dispatchable {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		c := cand
+		err := p.Submit(func(ctx context.Context) error {
+			_, err := l.stepOne(ctx, c)
+			return err
+		})
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, pool.ErrQueueFull) {
+			// Deterministic overflow: stop planning additional items and
+			// drain the admitted ones. The refused candidates stay undone.
+			break
+		}
+		return err
+	}
+	return p.Drain(ctx)
 }
 
 // Workers reads cgroup v2 resources under the configured prefix and applies
@@ -319,6 +439,8 @@ func (l *Loop) selectable(ctx context.Context) ([]decision.Candidate, error) {
 
 // markDone records id as completed in the persisted state.
 func (l *Loop) markDone(id string) error {
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
 	st, err := l.state.Load()
 	if err != nil {
 		return err
@@ -331,8 +453,12 @@ func (l *Loop) markDone(id string) error {
 }
 
 // beginIntent persists one write-ahead intent (atomically) before its mutation
-// is attempted. A re-begin for the same candidate replaces the entry.
+// is attempted. A re-begin for the same candidate replaces the entry. The Store
+// mutation is serialized under stateMu so concurrent workers never lose an
+// intent.
 func (l *Loop) beginIntent(in Intent) error {
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
 	st, err := l.state.Load()
 	if err != nil {
 		return err
@@ -354,6 +480,8 @@ func (l *Loop) beginIntent(in Intent) error {
 // rollbackIntent removes an intent whose mutation was abandoned (a normal
 // dispatch failure), so the item is re-dispatched cleanly on the next run.
 func (l *Loop) rollbackIntent(id string) error {
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
 	st, err := l.state.Load()
 	if err != nil {
 		return err
@@ -365,6 +493,8 @@ func (l *Loop) rollbackIntent(id string) error {
 // completeIntent atomically moves an intent from the in-flight log to Done:
 // the mutation is confirmed applied and the item is complete.
 func (l *Loop) completeIntent(id string) error {
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
 	st, err := l.state.Load()
 	if err != nil {
 		return err
