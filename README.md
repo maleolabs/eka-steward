@@ -47,7 +47,9 @@ cmd/                     Cobra command tree (the only production package)
   root.go                root command, exit-code contract
   version.go             version var (ldflags) + `version` command
   *_test.go              boundary, layout-pin and version tests
+internal/escapehatch/    the one audited subprocess adapter (allow-list)
 docs/adr/                architecture decision records
+docs/boundary.md         the two hard boundary rules (api-only, one escape hatch)
 scripts/bump.sh          version bump + tag automation
 anvil.yaml               anvil project + lifecycle definition
 .anvil/pipelines/        CI and release build pipelines
@@ -81,7 +83,15 @@ Production code may import `github.com/maleolabs/eka-core/v2/api` and
 nothing else from eka-core. The kernel-internal packages — `runtime`,
 `store`, `workspace`, `sync` — are private implementation details and are
 forbidden in non-test code (ADR-014, ADR-030). `cmd/boundary_arch_test.go`
-walks every non-test `.go` file and fails on any such import.
+walks every non-test `.go` file and fails on any such import. The steward
+never writes the EKA store directly.
+
+The one place the steward leaves its own process — running another CLI —
+goes through the single adapter package `internal/escapehatch`; no other
+non-test package may import `os/exec`, and the adapter runs only
+allow-listed executable base names. MCP is not a dependency. Both rules
+and the allow-list policy are documented in
+[`docs/boundary.md`](docs/boundary.md) and enforced by tests.
 
 ## Deliberate omissions vs eka-cli
 

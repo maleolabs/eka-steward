@@ -40,44 +40,12 @@ func TestNoInternalCoreImportsInNonTestCode(t *testing.T) {
 	root := moduleRoot(t)
 
 	found := map[string][]string{} // relative path -> forbidden imports
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			// Skip VCS/build noise; never skip a real source dir in this module.
-			if name := d.Name(); name == ".git" || name == "testdata" {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-
-		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
-		if err != nil {
-			return err
-		}
-		for _, imp := range f.Imports {
-			p, err := strconv.Unquote(imp.Path.Value)
-			if err != nil {
-				continue
-			}
+	for _, rel := range nonTestGoFiles(t, root) {
+		for _, p := range importsOf(t, filepath.Join(root, rel)) {
 			if isForbidden(p) {
 				found[rel] = append(found[rel], p)
 			}
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk module source: %v", err)
 	}
 
 	// Every forbidden coupling must be exactly the pinned known gap:
@@ -101,6 +69,60 @@ func TestNoInternalCoreImportsInNonTestCode(t *testing.T) {
 	}
 }
 
+// escapeHatchPackage is the one and only non-test package allowed to
+// spawn subprocesses via os/exec. It is deliberately a single adapter
+// (internal/escapehatch) so every "escape hatch" call is audited in one
+// place, and so a subprocess can never become a second path to the EKA
+// store. The test below fails if any other non-test file reaches
+// os/exec, and fails if this pin goes stale.
+const escapeHatchPackage = "internal/escapehatch"
+
+// TestSubprocessCallsOnlyInEscapeHatchAdapter fails if any non-test .go
+// file outside internal/escapehatch imports os/exec — i.e. if the store
+// could be touched through a process spawn anywhere but the one audited
+// adapter. It also fails if the pinned adapter no longer imports os/exec
+// (a stale pin), mirroring the knownCoreGap self-check above.
+func TestSubprocessCallsOnlyInEscapeHatchAdapter(t *testing.T) {
+	root := moduleRoot(t)
+
+	var violations []string
+	adapterImportsExec := false
+	for _, rel := range nonTestGoFiles(t, root) {
+		if !importsPath(t, filepath.Join(root, rel), "os/exec") {
+			continue
+		}
+		if filepath.Dir(rel) == escapeHatchPackage {
+			adapterImportsExec = true
+			continue
+		}
+		violations = append(violations, rel+" imports os/exec (only "+escapeHatchPackage+" may spawn subprocesses)")
+	}
+	sort.Strings(violations)
+	if len(violations) > 0 {
+		t.Fatalf("os/exec may only be used by the %s adapter; offending files:\n  %s",
+			escapeHatchPackage, strings.Join(violations, "\n  "))
+	}
+	if !adapterImportsExec {
+		t.Fatalf("stale pin: %s no longer imports os/exec; update or remove escapeHatchPackage", escapeHatchPackage)
+	}
+}
+
+// TestNoMCPDependency asserts the steward's go.mod requires no MCP
+// module: the MCP surface is not a steward dependency (docs/boundary.md).
+func TestNoMCPDependency(t *testing.T) {
+	root := moduleRoot(t)
+	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		t.Fatalf("read go.mod: %v", err)
+	}
+	for i, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(strings.ToLower(line), "mcp") {
+			t.Fatalf("go.mod line %d references an MCP module (the MCP surface must not be a steward dependency): %q",
+				i+1, strings.TrimSpace(line))
+		}
+	}
+}
+
 // isForbidden reports whether import path p names a kernel-internal
 // eka-core package (exactly, or a subpackage of it).
 func isForbidden(p string) bool {
@@ -110,6 +132,67 @@ func isForbidden(p string) bool {
 		}
 	}
 	return false
+}
+
+// importsOf returns the import paths declared by the file at path.
+func importsOf(t *testing.T, path string) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	var imports []string
+	for _, imp := range f.Imports {
+		if p, err := strconv.Unquote(imp.Path.Value); err == nil {
+			imports = append(imports, p)
+		}
+	}
+	return imports
+}
+
+// importsPath reports whether the file at path imports importPath.
+func importsPath(t *testing.T, path, importPath string) bool {
+	t.Helper()
+	for _, p := range importsOf(t, path) {
+		if p == importPath {
+			return true
+		}
+	}
+	return false
+}
+
+// nonTestGoFiles returns the module-relative slash paths of every
+// non-test .go file in the module, skipping VCS/build noise. The same
+// pass backs every boundary assertion so the source set is consistent.
+func nonTestGoFiles(t *testing.T, root string) []string {
+	t.Helper()
+	var files []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			// Skip VCS/build noise; never skip a real source dir in this module.
+			if name := d.Name(); name == ".git" || name == "testdata" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		files = append(files, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk module source: %v", err)
+	}
+	return files
 }
 
 // moduleRoot walks up from the test's working directory to the dir
