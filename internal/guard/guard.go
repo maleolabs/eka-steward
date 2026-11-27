@@ -14,7 +14,9 @@
 //     filesystem access can still read outside it.
 //  3. Permission policy (permission.go) — an ACP permission request is
 //     denied by default; only a read-class request inside the workspace
-//     root may be allowed; every wait is bounded so a worker never hangs.
+//     root may be allowed. A well-formed request the allow-list does NOT
+//     cover is ESCALATED to a human (never silently denied), and every
+//     wait is bounded so a worker never hangs (docs/approval.md).
 //  4. Driver pinning (pinning.go) — every driver carries an exact version
 //     and a sha256 checksum; an unpinned or mismatched driver is refused.
 //

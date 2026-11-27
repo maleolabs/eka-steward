@@ -72,6 +72,7 @@ docs/checkpoint.md       crash-safe checkpoint/resume: intent log, reconcile, cr
 docs/recovery.md         bounded retry, cancel semantics, failure -> no partial write
 docs/observability.md    structured step log, metric names, run report, secret redaction
 docs/review.md           review stage: policy, deterministic reviewer, review-note gate
+docs/approval.md         human approval: escalation rule, no-TTY channel, typed artifact, bounded wait, resume
 docs/determinism.md      code decides which/when/if, the LLM decides what
 docs/drivers.md          driver registry: config, adapters, probing (never writes EKA)
 docs/guardrails.md       worker containment: four layers, VCS-isolation-not-a-boundary, residual risks
@@ -168,6 +169,22 @@ review` convention), and the loop advances/marks done **only** on approval. The
 zero-value policy disables review entirely, so the loop is byte-identical to the
 pre-review loop. The policy, the selection rule, the note convention, the gate
 and the crash-safety boundary are in [`docs/review.md`](docs/review.md).
+
+### Human approval
+
+When `loop.Config.Approval` is enabled, a permission request the pure guard
+policy **cannot decide** (`execute`/`edit`/`delete`/`move`, or a read outside the
+workspace root) is escalated to a human **before** dispatch instead of being
+silently denied. Clearly-deniable requests (a non-`allow_once` option, a
+forbidden in-root read) stay `Deny`; `Policy.DenyUndecidable` opts out of
+escalation entirely. The default channel is a **no-TTY** file/queue
+(`internal/approval`): a structured request file is published and a structured
+response file is polled with a **bounded wait** whose timeout is always a deny.
+The decision is recorded as a **resolved review-note** artifact through
+`internal/ekawrite` (the schema fixes the `role` vocabulary, so `role: review`
+carries it), with a deterministic replay gate so a resume records it **exactly
+once**. The escalation rule, the channel, the typed-artifact convention and the
+resumption guarantee are in [`docs/approval.md`](docs/approval.md).
 
 ## Drivers
 

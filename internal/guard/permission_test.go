@@ -16,6 +16,9 @@ func TestDecideTable(t *testing.T) {
 
 	allowRead := Policy{AllowReadWithinRoot: true}
 	denyRead := Policy{}
+	// denyUndecidable opts out of escalation: the same undecidable requests
+	// that default-escalate are then refused (the clearly-deniable fallback).
+	denyUndecidable := Policy{AllowReadWithinRoot: true, DenyUndecidable: true}
 
 	tests := []struct {
 		name string
@@ -23,33 +26,46 @@ func TestDecideTable(t *testing.T) {
 		req  PermissionRequest
 		want Outcome
 	}{
+		// Clearly-deniable: a non-allow_once option is Deny, never escalate.
 		{"zero request denied", denyRead, PermissionRequest{}, Deny},
-		{"read inside root allowed", allowRead,
-			PermissionRequest{ToolKind: ToolRead, Path: inside, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Allow},
-		{"read at root allowed", allowRead,
-			PermissionRequest{ToolKind: ToolRead, Path: root, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Allow},
-		{"read denied when policy forbids", denyRead,
-			PermissionRequest{ToolKind: ToolRead, Path: inside, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Deny},
-		{"read escaping via .. denied", allowRead,
-			PermissionRequest{ToolKind: ToolRead, Path: escape, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Deny},
-		{"read outside root denied", allowRead,
-			PermissionRequest{ToolKind: ToolRead, Path: outside, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Deny},
 		{"read unknown option denied", allowRead,
 			PermissionRequest{ToolKind: ToolRead, Path: inside, WorkspaceRoot: root, OptionID: "allow_now"}, Deny},
 		{"read allow_always denied", allowRead,
 			PermissionRequest{ToolKind: ToolRead, Path: inside, WorkspaceRoot: root, OptionID: OptionAllowAlways}, Deny},
 		{"read reject denied", allowRead,
 			PermissionRequest{ToolKind: ToolRead, Path: inside, WorkspaceRoot: root, OptionID: OptionRejectOnce}, Deny},
-		{"execute denied", allowRead,
+
+		// Decided by the policy alone (inside the root).
+		{"read inside root allowed", allowRead,
+			PermissionRequest{ToolKind: ToolRead, Path: inside, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Allow},
+		{"read at root allowed", allowRead,
+			PermissionRequest{ToolKind: ToolRead, Path: root, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Allow},
+		{"read denied when policy forbids", denyRead,
+			PermissionRequest{ToolKind: ToolRead, Path: inside, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Deny},
+
+		// Undecidable: escalate by default (default-escalate), deny on opt-out.
+		{"read escaping via .. escalated", allowRead,
+			PermissionRequest{ToolKind: ToolRead, Path: escape, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Escalate},
+		{"read outside root escalated", allowRead,
+			PermissionRequest{ToolKind: ToolRead, Path: outside, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Escalate},
+		{"execute escalated", allowRead,
+			PermissionRequest{ToolKind: ToolExecute, Path: inside, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Escalate},
+		{"edit escalated", allowRead,
+			PermissionRequest{ToolKind: ToolEdit, Path: inside, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Escalate},
+		{"delete escalated", allowRead,
+			PermissionRequest{ToolKind: ToolDelete, Path: inside, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Escalate},
+		{"move escalated", allowRead,
+			PermissionRequest{ToolKind: ToolMove, Path: inside, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Escalate},
+		{"unknown class escalated", allowRead,
+			PermissionRequest{ToolKind: "network", Path: inside, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Escalate},
+
+		// Opt-out: undecidable → Deny, the clearly-deniable classes unchanged.
+		{"read outside root denied on opt-out", denyUndecidable,
+			PermissionRequest{ToolKind: ToolRead, Path: outside, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Deny},
+		{"execute denied on opt-out", denyUndecidable,
 			PermissionRequest{ToolKind: ToolExecute, Path: inside, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Deny},
-		{"edit denied", allowRead,
-			PermissionRequest{ToolKind: ToolEdit, Path: inside, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Deny},
-		{"delete denied", allowRead,
-			PermissionRequest{ToolKind: ToolDelete, Path: inside, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Deny},
-		{"move denied", allowRead,
-			PermissionRequest{ToolKind: ToolMove, Path: inside, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Deny},
-		{"unknown class denied", allowRead,
-			PermissionRequest{ToolKind: "network", Path: inside, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Deny},
+		{"read inside root still allowed on opt-out", denyUndecidable,
+			PermissionRequest{ToolKind: ToolRead, Path: inside, WorkspaceRoot: root, OptionID: OptionAllowOnce}, Allow},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -67,6 +83,26 @@ func TestDecideIsDeterministic(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		if got := p.Decide(req); got != want {
 			t.Fatalf("Decide drifted: %v vs %v", got, want)
+		}
+	}
+}
+
+// TestEscalationIsNotApproval asserts the escalation branch never turns a
+// clearly-deniable request into Escalate, and that the default-escalate policy
+// never silently Allows an undecidable one.
+func TestEscalationIsNotApproval(t *testing.T) {
+	p := Policy{AllowReadWithinRoot: true}
+	// A bad option id is Deny regardless of the class/path.
+	for _, id := range []OptionID{OptionRejectOnce, OptionRejectAlways, OptionAllowAlways, "bogus"} {
+		if got := p.Decide(PermissionRequest{ToolKind: ToolExecute, Path: "/etc/x", WorkspaceRoot: "/ws", OptionID: id}); got != Deny {
+			t.Fatalf("Decide(option %q) = %v, want Deny (escalation must not rescue a refusal)", id, got)
+		}
+	}
+	// Default-escalate never yields Allow for an undecidable request.
+	req := PermissionRequest{ToolKind: ToolRead, Path: "/etc/passwd", WorkspaceRoot: "/ws", OptionID: OptionAllowOnce}
+	for i := 0; i < 50; i++ {
+		if got := p.Decide(req); got != Escalate {
+			t.Fatalf("Decide(undecidable) = %v, want Escalate (never Allow)", got)
 		}
 	}
 }

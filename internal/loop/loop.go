@@ -165,6 +165,12 @@ type Config struct {
 	// worker's output to a deterministic review role and gates completion on
 	// the verdict (docs/review.md).
 	Review ReviewPolicy
+	// Approval configures the human-approval escalation stage. Its zero value
+	// disables it, so the loop is byte-identical to the pre-approval loop;
+	// enabling it escalates a permission request the pure policy cannot decide
+	// to a human BEFORE dispatch, gates the step on the decision, and records
+	// the decision as a typed artifact (docs/approval.md).
+	Approval ApprovalPolicy
 	// Observer, when set, is notified of every completed or failed step and
 	// every applied EKA write, so a run can be logged and reported without the
 	// loop naming a logging stack (internal/obs, docs/observability.md). nil
@@ -301,6 +307,18 @@ func (l *Loop) runStep(ctx context.Context, c decision.Candidate) (Step, error) 
 // dropped) and a deterministic outcome is recorded.
 func (l *Loop) stepOne(ctx context.Context, c decision.Candidate) (Step, int, error) {
 	step := stepFor(c)
+
+	// Approval gate: a permission request the pure policy cannot decide is
+	// escalated to a human BEFORE any dispatch. A deny/timeout blocks the
+	// candidate (left un-Done) and surfaces an *ApprovalRefusal; an approval
+	// falls through to the normal step (docs/approval.md).
+	if l.cfg.Approval.enabled() {
+		if req, ok := l.cfg.Approval.Request(c); ok {
+			if err := l.approvalGate(ctx, c, step, req); err != nil {
+				return step, 0, err
+			}
+		}
+	}
 
 	// Review-required path: dispatch the author, run the review stage, and
 	// only on approval persist the transition intent and apply. The intent is
@@ -568,6 +586,19 @@ func (l *Loop) Resume(ctx context.Context) error {
 	for _, in := range st.InFlight {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		// An approval intent is a sub-step: re-read the durable decision and
+		// re-record it through the replay gate, then clear it WITHOUT marking
+		// the candidate done (its forward step still has to run). See
+		// docs/approval.md.
+		if in.Kind == IntentApproval {
+			if err := l.reconcileApproval(ctx, in); err != nil {
+				return err
+			}
+			if err := l.clearIntent(in.CandidateID); err != nil {
+				return err
+			}
+			continue
 		}
 		res, err := l.writer.Reconcile(ctx, in)
 		if err != nil {
@@ -837,6 +868,20 @@ func (l *Loop) completeIntent(id string) error {
 	if !st.Has(id) {
 		st.Done = append(st.Done, id)
 	}
+	return l.state.Save(st)
+}
+
+// clearIntent removes an in-flight intent WITHOUT marking the candidate done.
+// It is used for a sub-step (the approval gate) whose mutation is applied but
+// whose candidate still has its forward step to run.
+func (l *Loop) clearIntent(id string) error {
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
+	st, err := l.state.Load()
+	if err != nil {
+		return err
+	}
+	st.InFlight = removeIntent(st.InFlight, id)
 	return l.state.Save(st)
 }
 

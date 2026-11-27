@@ -91,6 +91,26 @@ func (e EkawriteWriter) Review(_ context.Context, c decision.Candidate, rec Revi
 	return err
 }
 
+// Approve records one human approval decision as a typed EKA artifact through
+// ekawrite, the single write path. The decision is recorded with the existing
+// review-note convention (role=review) while the deterministic replay gate
+// makes a re-issued identical decision a no-op (docs/approval.md).
+func (e EkawriteWriter) Approve(_ context.Context, c decision.Candidate, rec ApprovalRecord) error {
+	if e.Writer == nil {
+		return fmt.Errorf("loop: EkawriteWriter has no ekawrite.Writer")
+	}
+	_, err := e.Writer.Approval(ekawrite.ApprovalInput{
+		RepoPath:   e.RepoPath,
+		Target:     c.ID,
+		Verdict:    rec.Verdict,
+		RequestKey: rec.Key,
+		ToolKind:   rec.ToolKind,
+		Path:       rec.Path,
+		Reason:     rec.Reason,
+	})
+	return err
+}
+
 // toExchangeRelationships maps the loop's minimal edge to the exchange type
 // ekawrite consumes.
 func toExchangeRelationships(rels []Relationship) []exchange.Relationship {
