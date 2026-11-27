@@ -51,12 +51,14 @@ cmd/                     Cobra command tree (the only production package)
   *_test.go              boundary, layout-pin and version tests
 internal/escapehatch/    the one audited subprocess adapter (allow-list)
 internal/decision/      pure, deterministic selection/order kernel (stdlib only)
+internal/loop/          deterministic control loop (Plan/Step/Run, lock, cgroup sizing, resume state)
 internal/driver/        deterministic driver registry (parse/resolve/select + probe seam)
 internal/role/          steward worker-role config (parse + resolve; no EKA)
 internal/sizing/        pure worker-count sizing (no I/O, no LLM)
 internal/render/        pure, bounded context-payload renderer (stdlib only)
 docs/adr/                architecture decision records
 docs/boundary.md         the two hard boundary rules (api-only, one escape hatch)
+docs/control-loop.md     control loop: seams, pure Plan vs Step, lock, cgroup, state
 docs/determinism.md      code decides which/when/if, the LLM decides what
 docs/drivers.md          driver registry: config, adapters, probing (never writes EKA)
 docs/roles.md            roles are steward config; no role reads or writes EKA
@@ -148,8 +150,24 @@ of a machine snapshot and config (`internal/sizing`, stdlib only).
 `clamp(min(CPUCores/2, MemoryBytes/4GiB), 1, MaxWorkers)`, optionally
 reduced by a cost ceiling. The formula, the clamp, the cost-ceiling rule
 and the edge-behaviour table are in
-[`docs/sizing.md`](docs/sizing.md). Reading `cgroup` v2 to fill the
-snapshot is a separate, later control-loop work item.
+[`docs/sizing.md`](docs/sizing.md). The snapshot is filled from **cgroup
+v2** (`memory.max` / `cpu.max`, never host totals) by `internal/loop`; an
+unknown/`max`/missing limit falls back conservatively to the 1-worker floor
+(see [`docs/control-loop.md`](docs/control-loop.md)).
+
+## Control loop
+
+`internal/loop` is the deterministic control loop that binds the pure
+decision kernel (`internal/decision`), the single write path
+(`internal/ekawrite`), the cgroup-backed sizing (`internal/sizing`) and a
+persisted resume state. `Plan` is a pure selection (LLM-free, byte-stable,
+frozen in a committed golden file); `Step` dispatches exactly one candidate
+through the `Dispatcher` seam and records any mutation through the `Writer`
+seam (→ `ekawrite`); `Run` drives `Step` to quiescence. A single-instance
+lock (crash-safe `flock` on unix, exclusive-create on windows) refuses a
+second steward on the same workspace. The lifecycle, the three seams, the
+lock semantics, the cgroup fallback and the versioned state format are in
+[`docs/control-loop.md`](docs/control-loop.md).
 
 ## Context payload
 

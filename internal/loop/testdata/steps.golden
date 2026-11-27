@@ -1,0 +1,37 @@
+[
+  {
+    "candidateId": "f",
+    "kind": "dispatch",
+    "priority": 10,
+    "state": "planned",
+    "createdSeq": 5
+  },
+  {
+    "candidateId": "a",
+    "kind": "dispatch",
+    "priority": 10,
+    "state": "todo",
+    "createdSeq": 1
+  },
+  {
+    "candidateId": "b",
+    "kind": "dispatch",
+    "priority": 10,
+    "state": "todo",
+    "createdSeq": 2
+  },
+  {
+    "candidateId": "c",
+    "kind": "dispatch",
+    "priority": 10,
+    "state": "todo",
+    "createdSeq": 2
+  },
+  {
+    "candidateId": "d",
+    "kind": "dispatch",
+    "priority": 5,
+    "state": "planned",
+    "createdSeq": 3
+  }
+]
