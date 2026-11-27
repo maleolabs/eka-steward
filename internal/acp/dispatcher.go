@@ -24,6 +24,11 @@ type DispatcherConfig struct {
 	// Dir is the agent's working directory and the session cwd ("" = the
 	// dispatcher process's directory).
 	Dir string
+	// Env is the child environment handed to the agent. A nil Env means an
+	// EMPTY environment (escapehatch's contract), never the parent's. Callers
+	// pass the credential-free worker base plus only the driver-declared
+	// credentials (secrets.Broker.WorkerEnv), so no ambient variable leaks.
+	Env []string
 	// Prompt builds the instruction for a candidate. nil uses the candidate
 	// ID. It is a pure mapping: the dispatcher makes no control decision.
 	Prompt func(decision.Candidate) string
@@ -63,7 +68,7 @@ func NewDispatcher(dc DispatcherConfig) (*Dispatcher, error) {
 	}
 	return &Dispatcher{
 		allow:  escapehatch.NewAllowList(filepath.Base(dc.Driver.Cmd)),
-		spec:   escapehatch.Spec{Name: dc.Driver.Cmd, Args: dc.Driver.Args, Dir: dc.Dir},
+		spec:   escapehatch.Spec{Name: dc.Driver.Cmd, Args: dc.Driver.Args, Dir: dc.Dir, Env: dc.Env},
 		cfg:    cfg,
 		dir:    dc.Dir,
 		prompt: prompt,
