@@ -1,0 +1,40 @@
+# EKA Steward CI — runs the canonical quality gates through the anvil CLI.
+#
+# The pipeline definition lives in .anvil/pipelines/ci.yaml (format, vet,
+# windows cross-compile, unit tests); this workflow only triggers the
+# execution. Anvil is installed from its GitHub Release asset registry
+# via the curl installer, matching the EKA installer pattern.
+#
+# Deliberately omitted vs eka-cli: the installer e2e jobs and the
+# repository-scope `eka verify` gate. Steward is neither a repository
+# generator nor an EKA repository, and its installer scripts are thin
+# adaptations of eka-cli's already-covered ones. Add installer e2e here
+# only when a steward-specific install path diverges.
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install Anvil
+        run: curl -fsSL https://github.com/maleolabs/anvil/releases/latest/download/install.sh | sh
+
+      - name: Run CI pipeline
+        run: anvil pipeline ci

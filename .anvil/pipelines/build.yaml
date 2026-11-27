@@ -1,0 +1,94 @@
+pipeline:
+    name: build
+    stages:
+        - name: dependencies
+          tasks:
+            - name: download
+              command: go
+              args:
+                - mod
+                - download
+            - name: verify
+              command: go
+              args:
+                - mod
+                - verify
+        - name: compile
+          tasks:
+            # Release binaries follow the installer asset naming contract:
+            # eka-steward-<os>-<arch> (windows: eka-steward-<os>-<arch>.exe),
+            # version-stamped into cmd.version via ldflags. The asset set
+            # (linux/darwin/windows × amd64/arm64) matches the supported
+            # platforms of install.sh (POSIX) and install.ps1 (PowerShell).
+            #
+            # `git describe` yields vX.Y.Z; the leading `v` is stripped so
+            # the binary reports the same version as anvil.yaml (2.0.0),
+            # not the git tag spelling (v2.0.0).
+            - name: linux-amd64
+              command: sh
+              args:
+                - -c
+                - |
+                  VERSION=$(git describe --tags --always 2>/dev/null || echo "0.0.0-dev")
+                  VERSION=${VERSION#v}
+                  go build -ldflags="-X github.com/maleolabs/eka-steward/v2/cmd.version=${VERSION}" -o ${ANVIL_OUTPUT_DIR}/eka-steward-linux-amd64 ./cmd/eka-steward
+              env:
+                GOOS: linux
+                GOARCH: amd64
+            - name: linux-arm64
+              command: sh
+              args:
+                - -c
+                - |
+                  VERSION=$(git describe --tags --always 2>/dev/null || echo "0.0.0-dev")
+                  VERSION=${VERSION#v}
+                  go build -ldflags="-X github.com/maleolabs/eka-steward/v2/cmd.version=${VERSION}" -o ${ANVIL_OUTPUT_DIR}/eka-steward-linux-arm64 ./cmd/eka-steward
+              env:
+                GOOS: linux
+                GOARCH: arm64
+            - name: darwin-amd64
+              command: sh
+              args:
+                - -c
+                - |
+                  VERSION=$(git describe --tags --always 2>/dev/null || echo "0.0.0-dev")
+                  VERSION=${VERSION#v}
+                  go build -ldflags="-X github.com/maleolabs/eka-steward/v2/cmd.version=${VERSION}" -o ${ANVIL_OUTPUT_DIR}/eka-steward-darwin-amd64 ./cmd/eka-steward
+              env:
+                GOOS: darwin
+                GOARCH: amd64
+            - name: darwin-arm64
+              command: sh
+              args:
+                - -c
+                - |
+                  VERSION=$(git describe --tags --always 2>/dev/null || echo "0.0.0-dev")
+                  VERSION=${VERSION#v}
+                  go build -ldflags="-X github.com/maleolabs/eka-steward/v2/cmd.version=${VERSION}" -o ${ANVIL_OUTPUT_DIR}/eka-steward-darwin-arm64 ./cmd/eka-steward
+              env:
+                GOOS: darwin
+                GOARCH: arm64
+            # Windows binaries use the .exe suffix — the asset naming
+            # contract resolved by install.ps1.
+            - name: windows-amd64
+              command: sh
+              args:
+                - -c
+                - |
+                  VERSION=$(git describe --tags --always 2>/dev/null || echo "0.0.0-dev")
+                  VERSION=${VERSION#v}
+                  go build -ldflags="-X github.com/maleolabs/eka-steward/v2/cmd.version=${VERSION}" -o ${ANVIL_OUTPUT_DIR}/eka-steward-windows-amd64.exe ./cmd/eka-steward
+              env:
+                GOOS: windows
+                GOARCH: amd64
+            - name: windows-arm64
+              command: sh
+              args:
+                - -c
+                - |
+                  VERSION=$(git describe --tags --always 2>/dev/null || echo "0.0.0-dev")
+                  VERSION=${VERSION#v}
+                  go build -ldflags="-X github.com/maleolabs/eka-steward/v2/cmd.version=${VERSION}" -o ${ANVIL_OUTPUT_DIR}/eka-steward-windows-arm64.exe ./cmd/eka-steward
+              env:
+                GOOS: windows
+                GOARCH: arm64

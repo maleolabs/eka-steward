@@ -1,0 +1,8 @@
+# Built binary
+/eka-steward
+/eka-steward.exe
+
+# Build output
+/dist/
+*.test
+*.out

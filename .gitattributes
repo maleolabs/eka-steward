@@ -1,0 +1,3 @@
+# Installer scripts are executed directly, never compiled: keep LF on every
+# checkout so `sh install.sh` works from a Windows working copy too.
+*.sh text eol=lf
