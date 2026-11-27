@@ -156,7 +156,8 @@ Event types (`capabilities.events`): `step` · `dispatch` · `write` ·
 | `approval` | `App.Approve` → `Stream.EmitApproval` | `{requestId, decision}` |
 | `metrics` | `Recorder.Snapshot()` after each step | the snapshot counters |
 
-The protocol surface:
+The protocol surface (full framing, method, error and idempotency spec:
+[`protocol.md`](protocol.md)):
 
 | method | params | result |
 | --- | --- | --- |
