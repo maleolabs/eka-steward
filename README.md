@@ -181,9 +181,13 @@ is a named error (`driver.ErrUnknownTool`). Capability probing is **recorded**
 on the resolved driver (`Capabilities{Kind, Version, ACPVersion, Raw}`)
 through a `Runner` seam — a fake in unit tests, an
 `internal/escapehatch`-backed `ExecRunner` in production (the only file in
-the package that spawns). The shape, adapter table, probe seam and the
-deferred streaming ACP client live in [`docs/drivers.md`](docs/drivers.md);
-the parser/seam is `internal/driver`.
+the package that spawns). A driver is **KNOWN only when pinned** (exact
+version + sha256 checksum); `driver.ParseTrusted` / `config.ParseTrusted` are
+the fail-closed acceptance points, and `claude`/`codex` vendor CLI adapters
+carry an in-repo pin/audit table plus a deterministic `capabilities.json`
+artifact. The shape, adapter table, probe seam, trust rule, vendor pin table
+and the deferred streaming ACP client live in
+[`docs/drivers.md`](docs/drivers.md); the parser/seam is `internal/driver`.
 
 ## Worker sizing
 
