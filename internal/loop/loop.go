@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/maleolabs/eka-steward/v2/internal/decision"
+	"github.com/maleolabs/eka-steward/v2/internal/obs"
 	"github.com/maleolabs/eka-steward/v2/internal/pool"
 	"github.com/maleolabs/eka-steward/v2/internal/sizing"
 )
@@ -153,6 +154,17 @@ type Config struct {
 	// worker's output to a deterministic review role and gates completion on
 	// the verdict (docs/review.md).
 	Review ReviewPolicy
+	// Observer, when set, is notified of every completed or failed step and
+	// every applied EKA write, so a run can be logged and reported without the
+	// loop naming a logging stack (internal/obs, docs/observability.md). nil
+	// disables it. It is an observability seam: it never feeds a control
+	// decision and must be safe for concurrent use (the pooled path calls it
+	// from worker goroutines).
+	Observer obs.Observer
+	// Now is the injectable clock the loop uses to stamp each step's duration
+	// in the observer's step event. nil uses time.Now. A test installs a
+	// deterministic clock so a run report is byte-stable.
+	Now func() time.Time
 }
 
 // Loop is the deterministic control loop. Construct it with New. The sequential
@@ -237,11 +249,21 @@ func (l *Loop) Step(ctx context.Context) (Step, bool, error) {
 	if !ok {
 		return Step{}, false, nil
 	}
-	step, err := l.stepOne(ctx, c)
+	step, err := l.runStep(ctx, c)
 	if err != nil {
 		return step, true, err
 	}
 	return step, true, nil
+}
+
+// runStep times one checkpointed transaction and reports it to the observer,
+// so every step — dispatch, resume reconcile and the no-write path — yields
+// exactly one structured record with its outcome and the number of attempts.
+func (l *Loop) runStep(ctx context.Context, c decision.Candidate) (Step, error) {
+	start := l.now()
+	step, attempts, err := l.stepOne(ctx, c)
+	l.emitStep(c, step, attempts, err, l.now().Sub(start))
+	return step, err
 }
 
 // stepOne runs the checkpointed transaction for one already-selected
@@ -251,6 +273,9 @@ func (l *Loop) Step(ctx context.Context) (Step, bool, error) {
 // mutation (writeMu) but never the dispatch, so workers overlap on the LLM
 // seam while the checkpoint stays consistent.
 //
+// The second result is the number of dispatch attempts the step made (0 when
+// it failed before dispatching).
+//
 // The dispatch is retried at most Config.Retry.MaxAttempts times
 // (docs/recovery.md). Each attempt is its own write-ahead transaction: the
 // intent is persisted before the attempt and rolled back the moment the
@@ -258,7 +283,7 @@ func (l *Loop) Step(ctx context.Context) (Step, bool, error) {
 // running and a failed candidate leaves NO partial EKA write behind. After
 // MaxAttempts exhausted attempts the candidate is left un-Done (deferred, never
 // dropped) and a deterministic outcome is recorded.
-func (l *Loop) stepOne(ctx context.Context, c decision.Candidate) (Step, error) {
+func (l *Loop) stepOne(ctx context.Context, c decision.Candidate) (Step, int, error) {
 	step := stepFor(c)
 
 	// Review-required path: dispatch the author, run the review stage, and
@@ -267,22 +292,24 @@ func (l *Loop) stepOne(ctx context.Context, c decision.Candidate) (Step, error) 
 	// the review leaves NO in-flight intent — resume never advances an
 	// un-reviewed item (docs/review.md).
 	if required, err := l.cfg.Review.requires(); err != nil {
-		return step, err
+		return step, 0, err
 	} else if required {
-		return step, l.reviewedStep(ctx, c, step)
+		attempts, err := l.reviewedStep(ctx, c, step)
+		return step, attempts, err
 	}
 
 	// No write path configured: the run is plan/dispatch only and carries no
 	// checkpoint, so there is nothing to reconcile on resume.
 	if l.writer == nil || l.cfg.DispatchState == "" {
-		if _, err := l.dispatchWithRetry(ctx, c, nil, nil); err != nil {
-			return step, err
+		_, attempts, err := l.dispatchWithRetry(ctx, c, nil, nil)
+		if err != nil {
+			return step, attempts, err
 		}
 		if err := l.markDone(c.ID); err != nil {
-			return step, err
+			return step, attempts, err
 		}
 		l.observe(step)
-		return step, nil
+		return step, attempts, nil
 	}
 
 	in := Intent{
@@ -298,48 +325,52 @@ func (l *Loop) stepOne(ctx context.Context, c decision.Candidate) (Step, error) 
 	// Write-ahead: persist the intent BEFORE each attempt and roll it back on
 	// failure, so a normal dispatch (or timeout) failure leaves no intent and
 	// no partial write; only a crash leaves the intent for resume.
-	if _, err := l.dispatchWithRetry(ctx, c, begin, rollback); err != nil {
-		return step, err
+	_, attempts, err := l.dispatchWithRetry(ctx, c, begin, rollback)
+	if err != nil {
+		return step, attempts, err
 	}
 	l.crash(BoundaryAfterDispatch)
 
 	if err := l.advance(ctx, c); err != nil {
-		return step, fmt.Errorf("loop: record %s: %w", c.ID, err)
+		return step, attempts, fmt.Errorf("loop: record %s: %w", c.ID, err)
 	}
+	l.observeWrite(c.ID, string(IntentTransition), "applied")
 	l.crash(BoundaryAfterApply)
 
 	if err := l.completeIntent(c.ID); err != nil {
-		return step, err
+		return step, attempts, err
 	}
 	l.observe(step)
-	return step, nil
+	return step, attempts, nil
 }
 
 // reviewedStep runs one review-required step: dispatch the author, run the
 // review stage, record the outcome, and either apply the transition (approved)
 // or leave the candidate un-done (not approved). The transition intent is
 // persisted only after approval, so resume never completes an un-reviewed item.
-func (l *Loop) reviewedStep(ctx context.Context, c decision.Candidate, step Step) error {
+// It returns the number of author dispatch attempts.
+func (l *Loop) reviewedStep(ctx context.Context, c decision.Candidate, step Step) (int, error) {
 	rec, ok := l.writer.(ReviewRecorder)
 	if l.writer == nil || !ok {
-		return fmt.Errorf("loop: review required for %s but the writer cannot record a review", c.ID)
+		return 0, fmt.Errorf("loop: review required for %s but the writer cannot record a review", c.ID)
 	}
 
-	res, err := l.dispatchWithRetry(ctx, c, nil, nil)
+	res, attempts, err := l.dispatchWithRetry(ctx, c, nil, nil)
 	if err != nil {
-		return err
+		return attempts, err
 	}
 	l.crash(BoundaryAfterDispatch)
 
 	outcome, err := l.runReview(ctx, c, res.Output)
 	if err != nil {
-		return err
+		return attempts, err
 	}
 	if err := l.recordReview(ctx, rec, c, outcome); err != nil {
-		return fmt.Errorf("loop: record review of %s: %w", c.ID, err)
+		return attempts, fmt.Errorf("loop: record review of %s: %w", c.ID, err)
 	}
+	l.observeWrite(c.ID, WriteKindNote, outcome.Verdict)
 	if !outcome.Approved() {
-		return &ReviewRefusal{
+		return attempts, &ReviewRefusal{
 			CandidateID: c.ID,
 			Reviewer:    outcome.Reviewer,
 			Verdict:     outcome.Verdict,
@@ -351,10 +382,10 @@ func (l *Loop) reviewedStep(ctx context.Context, c decision.Candidate, step Step
 	// only; otherwise the transition runs as its own write-ahead transaction.
 	if l.cfg.DispatchState == "" {
 		if err := l.markDone(c.ID); err != nil {
-			return err
+			return attempts, err
 		}
 		l.observe(step)
-		return nil
+		return attempts, nil
 	}
 
 	if err := l.beginIntent(Intent{
@@ -364,20 +395,21 @@ func (l *Loop) reviewedStep(ctx context.Context, c decision.Candidate, step Step
 		To:          l.cfg.DispatchState,
 		Step:        step,
 	}); err != nil {
-		return err
+		return attempts, err
 	}
 	l.crash(BoundaryAfterIntent)
 
 	if err := l.advance(ctx, c); err != nil {
-		return fmt.Errorf("loop: record %s: %w", c.ID, err)
+		return attempts, fmt.Errorf("loop: record %s: %w", c.ID, err)
 	}
+	l.observeWrite(c.ID, string(IntentTransition), "applied")
 	l.crash(BoundaryAfterApply)
 
 	if err := l.completeIntent(c.ID); err != nil {
-		return err
+		return attempts, err
 	}
 	l.observe(step)
-	return nil
+	return attempts, nil
 }
 
 // dispatchWithRetry runs the bounded, deterministic dispatch retry loop for one
@@ -388,28 +420,33 @@ func (l *Loop) reviewedStep(ctx context.Context, c decision.Candidate, step Step
 // attempt's intent back via rollback (nil when there is no write path) and
 // retries until MaxAttempts is reached or the context is cancelled.
 //
+// It returns the number of dispatch attempts actually made (0 when begin
+// failed before the first dispatch), for the observer's step record.
+//
 // Cancellation (the caller's ctx, or Loop.Cancel) is never retried: the loop
 // stops, the attempt's intent is already rolled back, and the candidate stays
 // un-Done. A retry is reported to the Metrics seam exactly once per
 // re-dispatch, so the count is deterministic: MaxAttempts attempts yield
 // MaxAttempts-1 retries when every attempt fails.
-func (l *Loop) dispatchWithRetry(ctx context.Context, c decision.Candidate, begin, rollback func() error) (DispatchResult, error) {
+func (l *Loop) dispatchWithRetry(ctx context.Context, c decision.Candidate, begin, rollback func() error) (DispatchResult, int, error) {
 	max := l.cfg.Retry.MaxAttempts
 	if max < 1 {
 		max = 1
 	}
 	var lastErr error
+	attempts := 0
 	for attempt := 1; attempt <= max; attempt++ {
 		if begin != nil {
 			if err := begin(); err != nil {
-				return DispatchResult{}, err
+				return DispatchResult{}, attempts, err
 			}
 			l.crash(BoundaryAfterIntent)
 		}
 
+		attempts = attempt
 		res, err := l.dispatch(ctx, c)
 		if err == nil {
-			return res, nil
+			return res, attempts, nil
 		}
 		lastErr = err
 		if rollback != nil {
@@ -424,7 +461,7 @@ func (l *Loop) dispatchWithRetry(ctx context.Context, c decision.Candidate, begi
 		l.recordRetry()
 		l.sleep(l.cfg.Retry.Backoff)
 	}
-	return DispatchResult{}, lastErr
+	return DispatchResult{}, attempts, lastErr
 }
 
 // dispatch runs ONE dispatch attempt, bounded by Config.AttemptTimeout when it
@@ -516,9 +553,11 @@ func (l *Loop) Resume(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if _, err := l.writer.Reconcile(ctx, in); err != nil {
+		res, err := l.writer.Reconcile(ctx, in)
+		if err != nil {
 			return fmt.Errorf("loop: reconcile %s: %w", in.CandidateID, err)
 		}
+		l.observeWrite(in.Target, string(in.Kind), res.Status)
 		if err := l.completeIntent(in.CandidateID); err != nil {
 			return err
 		}
@@ -663,7 +702,7 @@ func (l *Loop) runPooled(ctx context.Context) error {
 		}
 		c := cand
 		err := p.Submit(func(ctx context.Context) error {
-			_, err := l.stepOne(ctx, c)
+			_, err := l.runStep(ctx, c)
 			return err
 		})
 		if err == nil {
@@ -806,6 +845,52 @@ func (l *Loop) observe(s Step) {
 	if l.cfg.OnStep != nil {
 		l.cfg.OnStep(s)
 	}
+}
+
+// WriteKindNote is the write class of a review outcome. It mirrors an EKA note
+// written against the reviewed line.
+const WriteKindNote = "note"
+
+// emitStep reports one step to the observer: its outcome, the number of
+// dispatch attempts and how long it took. A context cancellation/deadline is
+// the deterministic cancel of docs/recovery.md, reported as OutcomeCancelled.
+func (l *Loop) emitStep(c decision.Candidate, step Step, attempts int, err error, d time.Duration) {
+	if l.cfg.Observer == nil {
+		return
+	}
+	outcome := obs.OutcomeOK
+	switch {
+	case err == nil:
+		// ok
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		outcome = obs.OutcomeCancelled
+	default:
+		outcome = obs.OutcomeFailed
+	}
+	l.cfg.Observer.Step(obs.StepEvent{
+		CandidateID: c.ID,
+		Kind:        step.Kind,
+		Outcome:     outcome,
+		Attempts:    attempts,
+		Duration:    d,
+	})
+}
+
+// observeWrite reports one applied EKA write to the observer, if any. The loop
+// reports the affected line, the write class and the result; the true
+// instance version of a publish is produced by internal/ekawrite, not here.
+func (l *Loop) observeWrite(line, kind, result string) {
+	if l.cfg.Observer != nil {
+		l.cfg.Observer.Write(obs.WriteEvent{Line: line, Kind: kind, Result: result})
+	}
+}
+
+// now returns the loop's clock (the injectable seam, or time.Now).
+func (l *Loop) now() time.Time {
+	if l.cfg.Now != nil {
+		return l.cfg.Now()
+	}
+	return time.Now()
 }
 
 // ready reports whether a candidate is in a dispatchable state. It mirrors

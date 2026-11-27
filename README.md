@@ -54,6 +54,7 @@ internal/decision/      pure, deterministic selection/order kernel (stdlib only)
 internal/discuss/       discussion phase: bounded, resumable turns recorded as EKA decisions
 internal/loop/          deterministic control loop (Plan/Step/Run, lock, cgroup sizing, resume state)
 internal/pool/          bounded worker pool: concurrency + deterministic backpressure (no EKA)
+internal/obs/           observability: structured step log, metrics, run report, secret redaction
 internal/guard/         worker containment: env allow-list, per-worker worktree, permission policy, driver pinning
 internal/driver/        deterministic driver registry (parse/resolve/select + probe seam)
 internal/role/          steward worker-role config (parse + resolve; no EKA)
@@ -66,6 +67,7 @@ docs/discuss.md          discussion phase: lifecycle, code vs LLM split, recorde
 docs/backpressure.md     bounded worker pool: sizing-bounded concurrency, deterministic overflow, metrics
 docs/checkpoint.md       crash-safe checkpoint/resume: intent log, reconcile, crash matrix
 docs/recovery.md         bounded retry, cancel semantics, failure -> no partial write
+docs/observability.md    structured step log, metric names, run report, secret redaction
 docs/review.md           review stage: policy, deterministic reviewer, review-note gate
 docs/determinism.md      code decides which/when/if, the LLM decides what
 docs/drivers.md          driver registry: config, adapters, probing (never writes EKA)
@@ -256,6 +258,29 @@ is idempotent. Retries and cancellations are reported through the `pool.Metrics`
 seam (`Retries`, `Cancellations`). The policy, the attempt-per-transaction
 protocol, the cancel semantics, the failure→no-partial-write table and where
 each property is enforced are in [`docs/recovery.md`](docs/recovery.md).
+
+## Observability: structured log, metrics & run report
+
+`internal/obs` turns the loop's observability seams into a structured **JSON
+step log**, the **metrics** and a deterministic **run report**, and redacts
+secrets before anything is written. Wire ONE `obs.Recorder` into both
+`loop.Config.Metrics` and `loop.Config.Observer`:
+
+- **Log** — one `log/slog` JSON record per loop step with `driver`, `role`,
+  `outcome`, `candidateId`, `stepKind`, `attempt`, `durationMs`.
+- **Metrics** (`pool.Metrics` + step count) — `steps`, `retries`,
+  `cancellations`, `peakInFlight`, `queueDepth`, `dispatched`, `rejected`
+  (and `inFlight`, `peakQueueDepth`), read back with `Recorder.Snapshot()`.
+- **Report** — `Report{ Steps, Writes }` serialized deterministically
+  (`Report.Write` / `Report.MarshalJSON`, sorted, no map iteration) listing the
+  steps (candidateId, kind, outcome, role, driver, duration) and the EKA writes
+  (line, type, id, instanceVersion, kind, result).
+- **Redaction** — `sk-…`, `AIza…`, `ghp_…`, `Bearer …` tokens and an operator
+  deny-list are masked (`■■■`) before any log or report byte.
+
+The record/metric/report shapes and the redaction rule — including the residual
+risk that secrets inside model output are caught only by pattern — are in
+[`docs/observability.md`](docs/observability.md).
 
 ## Context payload
 
