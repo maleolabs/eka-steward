@@ -82,5 +82,6 @@ Run 'eka-steward version' for the build and contract versions.`,
 	root.PersistentFlags().Bool(flagVersion, false,
 		"print the steward build version and exit")
 	root.AddCommand(newVersionCommand())
+	root.AddCommand(newRunCommand())
 	return root
 }
