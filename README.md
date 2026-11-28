@@ -14,13 +14,18 @@ Module path: `github.com/maleolabs/eka-steward/v2` · Steward `2.2.0` · `eka-co
 
 ## Scope of this release
 
-`2.2.0` aligns the CLI's human output with the **eka-cli design system**, so
-`eka steward ...` looks like `eka`, and makes the machine report explicit:
+The `2.2` line aligns the CLI's human output with the **eka-cli design system**,
+so `eka steward ...` looks like `eka`, and makes the machine report explicit:
 
 - **Design-system output** (`internal/ui`, `cmd/render.go`) — the same left
   margin, ANSI 256-color palette, Unicode icons and aligned
   header/table/summary blocks `eka` renders. `run` prints a themed human report
   by default; `version` renders through the same style (plain, margin-indented).
+- **Themed help + container** (`internal/ui/container.go`, `cmd/help_render.go`)
+  — every command's help renders inside the output container (uniform left
+  margin + leading/trailing blank line), with command names in info, flag names
+  and the help hint in dim, mirroring `eka`; `--version` prints through the
+  margin too.
 - **`run --json`** — the deterministic machine report (`obs.Report.Write`),
   byte-identical to the pre-`2.2.0` output, on the raw writer (no margin, no
   color). Only the human default is restyled; the machine bytes never change.
@@ -71,7 +76,7 @@ See [`RELEASE_NOTES.md`](RELEASE_NOTES.md) and [`docs/release.md`](docs/release.
 Steward ships as a **standalone binary** — the primary artifact:
 
 ```sh
-go install github.com/maleolabs/eka-steward/v2/cmd/eka-steward@v2.2.0
+go install github.com/maleolabs/eka-steward/v2/cmd/eka-steward@v2.2.1
 ```
 
 plus the release binaries (`install.sh` / `install.ps1`).
@@ -112,6 +117,7 @@ cmd/                     Cobra command tree (the only production package)
   version.go             version var (ldflags) + `version` command
   run.go, serve.go       `run` (drive to quiescence) + `serve` (machine protocol over stdio/socket)
   render.go              the themed human `run` report (header + tables + summary) via internal/ui
+  help_render.go         the themed help renderer (container + styled command/flag names)
   manifest.go, install.go  eka-cli plugin subcommands (`manifest --json`, `install --json`)
   *_test.go              boundary, layout-pin and version tests
 internal/escapehatch/    the one audited subprocess adapter (allow-list); streaming Start/Proc spawn
@@ -132,7 +138,7 @@ internal/role/          steward worker-role config (parse + resolve; no EKA)
 internal/config/        versioned, strict combined config schema (composes role/driver/sizing; no EKA)
 internal/sizing/        pure worker-count sizing (no I/O, no LLM)
 internal/render/        pure, bounded context-payload renderer (stdlib only)
-internal/ui/            design-system mirror: margin, 256-color palette, icons, aligned header/table/summary (stdlib only)
+internal/ui/            design-system mirror: margin, output container, 256-color palette, icons, header/table/summary (stdlib only)
 internal/plan/          pure dependency-graph planner: topological + container + state order (no I/O, no LLM)
 docs/adr/                architecture decision records
 docs/boundary.md         the two hard boundary rules (api-only, one escape hatch)
@@ -173,7 +179,7 @@ deliberate, reviewed change.
 ## Usage
 
 ```sh
-eka-steward --version        # bare build version, e.g. 2.2.0
+eka-steward --version        # bare build version, e.g. 2.2.1
 eka-steward version          # build version + eka-core contract version
 eka-steward run …            # drive a project to quiescence (human report; --json machine report)
 eka-steward serve …          # host the machine protocol (stdio; --socket <path> for a unix socket)
@@ -485,11 +491,11 @@ its own [`.github/workflows/release.yml`](.github/workflows/release.yml) —
 independent of the `eka-cli` / `eka-mcp` / `eka-core` release train. The
 version is `anvil.yaml` → `project.version`, guarded by the workflow against
 the tag; the binary is stamped with `cmd.version` via `ldflags`. Current
-release: [`RELEASE_NOTES.md`](RELEASE_NOTES.md) (`v2.2.0`).
+release: [`RELEASE_NOTES.md`](RELEASE_NOTES.md) (`v2.2.1`).
 
 The pinned dependency, the ACP transport posture, the platform/asset naming
 contract, and the install paths (`install.sh` / `install.ps1` /
-`go install …@v2.2.0`) are documented in [`docs/release.md`](docs/release.md).
+`go install …@v2.2.1`) are documented in [`docs/release.md`](docs/release.md).
 The official plugin install path (`eka plugin install steward`) is in the same
 document.
 The release owner's step-by-step is

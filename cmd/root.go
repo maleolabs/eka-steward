@@ -16,9 +16,11 @@
 package cmd
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 
+	"github.com/maleolabs/eka-steward/v2/internal/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -59,17 +61,7 @@ Protocol (ACP) to drive an EKA project from discussion to execution.
 
 It is a thin, deterministic standalone binary and a consumer of
 eka-core's public contract (github.com/maleolabs/eka-core/v2/api): it
-holds no domain logic of its own.
-
-Commands:
-  run              drive a project to quiescence along the control loop
-  serve            host the versioned JSON-RPC 2.0 machine protocol
-                   (stdio, or a unix socket with --socket)
-  manifest --json  print the eka-cli plugin contract (v1) manifest
-  install --json   report the (empty) plugin artifact install result
-  version          print the build and eka-core contract versions
-
-Run 'eka-steward version' for the build and contract versions.`,
+holds no domain logic of its own.`,
 		// The binary owns all error output: SilenceErrors + SilenceUsage
 		// suppress cobra's "Error: ..." prefix and automatic usage dumps;
 		// Execute renders every error as one deterministic line.
@@ -79,7 +71,9 @@ Run 'eka-steward version' for the build and contract versions.`,
 		// `eka-steward --version` prints the bare build version instead.
 		RunE: func(c *cobra.Command, _ []string) error {
 			if show, _ := c.Flags().GetBool(flagVersion); show {
-				fmt.Fprintln(c.OutOrStdout(), version)
+				// Human output: the build version through the design-system
+				// margin, matching `eka --version` (plain, margin-indented).
+				fmt.Fprintln(styleFor(c).W, version)
 				return nil
 			}
 			return c.Help()
@@ -92,5 +86,19 @@ Run 'eka-steward version' for the build and contract versions.`,
 	root.AddCommand(newServeCommand())
 	root.AddCommand(newManifestCommand())
 	root.AddCommand(newInstallCommand())
+	// The output container wraps the help text of EVERY command (HelpFunc
+	// resolves up the tree): renderHelp produces the styled text (colors
+	// follow the real writer through the Style), and ui.Container adds the
+	// uniform left margin and the leading/trailing blank lines — help never
+	// sticks to the terminal corner.
+	root.SetHelpFunc(func(cmd *cobra.Command, _ []string) {
+		s := styleFor(cmd)
+		out := cmd.OutOrStdout()
+		buf := &bytes.Buffer{}
+		cmd.SetOut(buf)
+		renderHelp(cmd, s, buf)
+		cmd.SetOut(out)
+		ui.Container(s, buf.String())
+	})
 	return root
 }
