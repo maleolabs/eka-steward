@@ -12,4 +12,4 @@ artifact:
 project:
     description: EKA Steward — deterministic standalone orchestrator that drives an EKA project over ACP
     name: eka-steward
-    version: 2.2.0
+    version: 2.2.1

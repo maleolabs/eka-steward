@@ -10,7 +10,7 @@ the steward imports **only** the public contract
 `github.com/maleolabs/eka-core/v2/api` and holds no domain logic of its own —
 all knowledge access belongs in eka-core.
 
-Module path: `github.com/maleolabs/eka-steward/v2` · Steward `2.2.0` · `eka-core v2.0.1`
+Module path: `github.com/maleolabs/eka-steward/v2` · Steward `2.2.1` · `eka-core v2.0.1`
 
 ## Scope of this release
 
