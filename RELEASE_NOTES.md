@@ -1,4 +1,4 @@
-# eka-steward v2.2.0
+# eka-steward v2.2.1
 
 Thin, deterministic **standalone binary** that orchestrates AI coding-agent
 CLIs over the [Agent Client Protocol](https://agentclientprotocol.com) (ACP)
@@ -14,9 +14,25 @@ Module: `github.com/maleolabs/eka-steward/v2`
   v2.0.1`**, **`api` package only** (module path carries the `/v2` major
   suffix). Kernel-internal packages (`runtime`, `store`, `workspace`, `sync`)
   are forbidden in non-test code, enforced by test.
-- Steward build version (`2.2.0`) and the `eka-core` public-contract version
+- Steward build version (`2.2.1`) and the `eka-core` public-contract version
   (`api.ContractVersion`, currently `v1`) are separate axes. `eka-steward
   version` prints both.
+
+## Fixed in `2.2.1` (themed help + output container)
+
+`2.2.0` themed `run` and `version` but left the help surface as raw cobra
+output (no margin, no color). `2.2.1` completes the alignment:
+
+- **Themed help** (`cmd/help_render.go`) — every command's help renders inside
+  the output container (`internal/ui/container.go`: uniform left margin +
+  leading/trailing blank line) with command names in info, flag names and the
+  help hint in dim — mirroring `eka`'s help renderer.
+- **`--version` through the margin** — the bare build version prints
+  margin-indented, matching `eka --version`.
+- **No duplicate command list** — the root `Long` drops its hand-written
+  command block; cobra's rendered `Available Commands:` is the single source.
+- Non-TTY output stays plain text with no ANSI (colors only on a color TTY);
+  `run --json` and the machine surface are untouched.
 
 ## New in `2.2.0` (design-system-aligned CLI output)
 
@@ -203,14 +219,14 @@ Highlights of the underlying orchestrator core (container `ctr:steward` / M7):
 
 ```sh
 # Linux / macOS — checksum-verified (fail-closed) installer
-curl -fsSL https://github.com/maleolabs/eka-steward/releases/download/v2.2.0/install.sh | sh
+curl -fsSL https://github.com/maleolabs/eka-steward/releases/download/v2.2.1/install.sh | sh
 
 # Windows (PowerShell 5.1+ / 7+)
-$s = irm https://github.com/maleolabs/eka-steward/releases/download/v2.2.0/install.ps1
-iex "$s -Version v2.2.0"
+$s = irm https://github.com/maleolabs/eka-steward/releases/download/v2.2.1/install.ps1
+iex "$s -Version v2.2.1"
 
 # or from source
-go install github.com/maleolabs/eka-steward/v2/cmd/eka-steward@v2.2.0
+go install github.com/maleolabs/eka-steward/v2/cmd/eka-steward@v2.2.1
 
 # or as an official eka-cli plugin (no PATH install)
 eka plugin install steward
@@ -228,7 +244,7 @@ the pinned **source dependency** on `eka-core/v2 v2.0.1`.
 
 ## Also of note
 
-- `eka-steward version` prints `eka-steward 2.2.0` and `eka-core api v1`; a
+- `eka-steward version` prints `eka-steward 2.2.1` and `eka-core api v1`; a
   plain (unstamped) build prints `dev`.
 - The **live ACP client now ships** (`internal/acp`, standard library only). It
   is driven by the production dispatcher; the audited `internal/escapehatch`
